@@ -3,6 +3,7 @@ package gsmail
 
 import (
 	"context"
+	"fmt"
 )
 
 const (
@@ -22,4 +23,15 @@ func Send(ctx context.Context, s Sender, email Email) error {
 // Receive retrieves emails using the specified fetcher.
 func Receive(ctx context.Context, f Receiver, limit int) ([]Email, error) {
 	return f.Receive(ctx, limit)
+}
+
+// Ping checks the connection of the given sender or receiver.
+func Ping(ctx context.Context, p interface{}) error {
+	if s, ok := p.(Sender); ok {
+		return s.Ping(ctx)
+	}
+	if r, ok := p.(Receiver); ok {
+		return r.Ping(ctx)
+	}
+	return fmt.Errorf("provider does not implement Sender or Receiver interface")
 }

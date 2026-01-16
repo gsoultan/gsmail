@@ -30,6 +30,27 @@ func NewReceiver(host string, port int, username, password string, ssl bool) *Re
 	}
 }
 
+// Ping checks the connection to the POP3 server.
+func (f *Receiver) Ping(ctx context.Context) error {
+	p := gopop3.New(gopop3.Opt{
+		Host:       f.Host,
+		Port:       f.Port,
+		TLSEnabled: f.SSL,
+	})
+
+	conn, err := p.NewConn()
+	if err != nil {
+		return fmt.Errorf("pop3 dial: %w", err)
+	}
+	defer func() { _ = conn.Quit() }()
+
+	if err := conn.Noop(); err != nil {
+		return fmt.Errorf("pop3 noop: %w", err)
+	}
+
+	return nil
+}
+
 // Receive retrieves emails using POP3.
 func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, error) {
 	p := gopop3.New(gopop3.Opt{

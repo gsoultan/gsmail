@@ -182,6 +182,20 @@ func TestSESProvider(t *testing.T) {
 			t.Error("expected error for SES fail")
 		}
 	})
+
+	t.Run("Ping", func(t *testing.T) {
+		tsPing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"Account": {}}`))
+		}))
+		defer tsPing.Close()
+
+		pPing := ses.NewSender("us-east-1", "test", "test", tsPing.URL)
+		err := gsmail.Ping(context.Background(), pPing)
+		if err != nil {
+			t.Fatalf("Ping failed: %v", err)
+		}
+	})
 }
 
 func TestSMTPProviderStructure(t *testing.T) {

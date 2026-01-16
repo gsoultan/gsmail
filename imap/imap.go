@@ -35,6 +35,47 @@ func NewReceiver(host string, port int, username, password string, ssl bool) *Re
 	}
 }
 
+// Ping checks the connection to the IMAP server.
+func (f *Receiver) Ping(ctx context.Context) error {
+	addr := net.JoinHostPort(f.Host, fmt.Sprintf("%d", f.Port))
+
+	var conn net.Conn
+	var err error
+	d := net.Dialer{Timeout: 30 * time.Second}
+	conn, err = d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("imap dial: %w", err)
+	}
+
+	var c *client.Client
+	if f.SSL {
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: f.Host, MinVersion: tls.VersionTLS12})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = tlsConn.Close()
+			return fmt.Errorf("imap tls handshake: %w", err)
+		}
+		c, err = client.New(tlsConn)
+		if err != nil {
+			_ = tlsConn.Close()
+			return fmt.Errorf("imap client new: %w", err)
+		}
+	} else {
+		c, err = client.New(conn)
+		if err != nil {
+			_ = conn.Close()
+			return fmt.Errorf("imap client new: %w", err)
+		}
+	}
+
+	defer func() { _ = c.Logout() }()
+
+	if err := c.Noop(); err != nil {
+		return fmt.Errorf("imap noop: %w", err)
+	}
+
+	return nil
+}
+
 // Receive retrieves emails using IMAP.
 func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, error) {
 	addr := net.JoinHostPort(f.Host, fmt.Sprintf("%d", f.Port))

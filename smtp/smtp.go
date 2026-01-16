@@ -50,6 +50,22 @@ func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
 	return p.sendPlain(ctx, addr, auth, email.From, email.To, *bufPtr)
 }
 
+// Ping checks the connection to the SMTP server.
+func (p *Sender) Ping(ctx context.Context) error {
+	addr := net.JoinHostPort(p.Host, fmt.Sprintf("%d", p.Port))
+	_, client, err := p.dial(ctx, addr, p.SSL)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	if err := client.Noop(); err != nil {
+		return fmt.Errorf("smtp noop: %w", err)
+	}
+
+	return client.Quit()
+}
+
 func (p *Sender) sendOnClient(client *smtp.Client, from string, to []string, msg []byte) error {
 	if err := client.Mail(from); err != nil {
 		return fmt.Errorf("smtp mail from: %w", err)

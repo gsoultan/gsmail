@@ -14,6 +14,7 @@
 - **Zero-Allocation Focus**: Optimized hot paths and `sync.Pool` utilization to minimize heap allocations and pressure on the GC.
 - **Modern AWS SDK**: Uses AWS SDK for Go v2.
 - **Context Awareness**: Full support for `context.Context` for timeouts and cancellation.
+- **Connection Health Check**: Easily verify connectivity to providers using the `Ping` method.
 - **Examples Included**: See the `examples/` directory for complete usage scenarios.
 
 ## Installation
@@ -57,27 +58,33 @@ func main() {
 ### AWS SES Usage
 
 ```go
-import "github.com/gsoultan/gsmail/ses"
+import (
+    "context"
+    "github.com/gsoultan/gsmail"
+    "github.com/gsoultan/gsmail/ses"
+)
 
-// Choose AWS SES sender
-sender := ses.NewSender("us-east-1", "ACCESS_KEY", "SECRET_KEY", "")
-err := gsmail.Send(context.Background(), sender, email)
+func main() {
+    // ... email creation from previous example
+
+    // Choose AWS SES sender
+    sender := ses.NewSender("us-east-1", "ACCESS_KEY", "SECRET_KEY", "")
+    err := gsmail.Send(context.Background(), sender, email)
+    if err != nil {
+        panic(err)
+    }
+}
 ```
 
 ### Sending with Attachments
 
 ```go
-email := gsmail.Email{
-    From:    "sender@example.com",
-    To:      []string{"receiver@example.com"},
-    Subject: "Report with Attachments",
-    Body:    []byte("Please find the attached reports."),
-    Attachments: []gsmail.Attachment{
-        {
-            Filename:    "report.pdf",
-            ContentType: "application/pdf",
-            Data:        pdfBytes,
-        },
+// ... assuming email, pdfBytes are defined
+email.Attachments = []gsmail.Attachment{
+    {
+        Filename:    "report.pdf",
+        ContentType: "application/pdf",
+        Data:        pdfBytes,
     },
 }
 ```
@@ -87,13 +94,14 @@ email := gsmail.Email{
 ### Loading Templates from URL
 
 ```go
-ctx := context.Background()
-err := email.SetBodyFromURL(ctx, "https://example.com/templates/welcome.html", data)
+// ... assuming email, data are defined
+err := email.SetBodyFromURL(context.Background(), "https://example.com/templates/welcome.html", data)
 ```
 
 ### Loading Templates from S3
 
 ```go
+// ... assuming email, data are defined
 s3Cfg := gsmail.S3Config{
     Region:    "us-east-1",
     Bucket:    "my-templates",
@@ -101,35 +109,46 @@ s3Cfg := gsmail.S3Config{
     AccessKey: "S3_ACCESS_KEY",
     SecretKey: "S3_SECRET_KEY",
 }
-err := email.SetBodyFromS3(ctx, s3Cfg, data)
+err := email.SetBodyFromS3(context.Background(), s3Cfg, data)
 ```
 
 ### Receiving Emails (IMAP)
 
 ```go
 import (
+    "context"
     "fmt"
     "github.com/gsoultan/gsmail/imap"
 )
 
-receiver := imap.NewReceiver("imap.example.com", 993, "user", "pass", true)
-emails, err := receiver.Receive(context.Background(), 10)
-if err != nil {
-    panic(err)
-}
-for _, email := range emails {
-    fmt.Printf("From: %s, Subject: %s\n", email.From, email.Subject)
+func main() {
+    receiver := imap.NewReceiver("imap.example.com", 993, "user", "pass", true)
+    emails, err := receiver.Receive(context.Background(), 10)
+    if err != nil {
+        panic(err)
+    }
+    for _, email := range emails {
+        fmt.Printf("From: %s, Subject: %s\n", email.From, email.Subject)
+    }
 }
 ```
 
 ### Receiving Emails (POP3)
 
 ```go
-import "github.com/gsoultan/gsmail/pop3"
+import (
+    "context"
+    "github.com/gsoultan/gsmail/pop3"
+)
 
-receiver := pop3.NewReceiver("pop.example.com", 995, "user", "pass", true)
-emails, err := receiver.Receive(context.Background(), 10)
-// ...
+func main() {
+    receiver := pop3.NewReceiver("pop.example.com", 995, "user", "pass", true)
+    emails, err := receiver.Receive(context.Background(), 10)
+    if err != nil {
+        panic(err)
+    }
+    // ... process emails
+}
 ```
 
 ### Email Validation
@@ -139,13 +158,28 @@ emails, err := receiver.Receive(context.Background(), 10)
 isValid := gsmail.IsValidEmail("test@example.com")
 
 // Existence check (MX lookup + SMTP handshake)
-err := gsmail.ValidateEmailExistence(ctx, "test@example.com")
+err := gsmail.ValidateEmailExistence(context.Background(), "test@example.com")
 if err != nil {
     fmt.Printf("Email does not exist: %v\n", err)
 }
 
 // Or use the Validate method on a Sender or Receiver
-err = sender.Validate(ctx, "test@example.com")
+err = sender.Validate(context.Background(), "test@example.com")
+```
+
+### Connection Checking (Ping)
+
+Verify that your provider is correctly configured and reachable.
+
+```go
+// Ping any Sender or Receiver
+err := gsmail.Ping(context.Background(), sender)
+if err != nil {
+    fmt.Printf("Connection failed: %v\n", err)
+}
+
+// Or call Ping directly on the provider
+err = receiver.Ping(context.Background())
 ```
 
 ## Performance Guidelines
@@ -158,7 +192,20 @@ go build -ldflags="-s -w" -gcflags="-m -l" .
 
 - `-s -w`: Reduces binary size by stripping debug symbols.
 - `-gcflags="-m -l"`: `-m` prints optimization decisions (like escape analysis) to help achieve zero allocations, and `-l` disables inlining if needed.
-
-## License
++
++## Benchmarks
++
++`gsmail` is optimized for high performance and low memory allocations. Below are the benchmark results for core utilities:
++
++```text
++BenchmarkIsHTML-12                      160427133                7.527 ns/op          0 B/op           0 allocs/op
++BenchmarkHasHeader-12                   35312084                36.48 ns/op           0 B/op           0 allocs/op
++BenchmarkParseRawEmail-12                 344103              4371 ns/op           5400 B/op          15 allocs/op
++BenchmarkParseRawEmailMultipart-12         60823             20156 ns/op          21045 B/op          75 allocs/op
++```
++
++*Tested on: AMD Ryzen 5 5500U, Go 1.21+*
++
+ ## License
 
 MIT

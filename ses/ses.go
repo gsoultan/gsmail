@@ -68,6 +68,19 @@ func (p *Sender) getClient(ctx context.Context) (*sesv2.Client, error) {
 	return p.client, nil
 }
 
+// Ping checks the connection to AWS SES by getting the client.
+func (p *Sender) Ping(ctx context.Context) error {
+	client, err := p.getClient(ctx)
+	if err != nil {
+		return fmt.Errorf("ses ping: %w", err)
+	}
+	_, err = client.GetAccount(ctx, &sesv2.GetAccountInput{})
+	if err != nil {
+		return fmt.Errorf("ses get account: %w", err)
+	}
+	return nil
+}
+
 // Send sends an email using AWS SES.
 func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
 	client, err := p.getClient(ctx)
