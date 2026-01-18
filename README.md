@@ -11,6 +11,7 @@
 - **Automatic Content Type Detection**: Automatically detects if an email is HTML or Plaintext based on the content.
 - **Email Validation**: Includes high-performance `IsValidEmail` (regex) and `ValidateEmailExistence` (MX/SMTP check) utilities.
 - **Attachments Support**: Send and receive multiple attachments with automatic MIME encoding/decoding.
+- **Outlook Compatibility**: Convert HTML templates to be compatible with Microsoft Outlook with a single flag.
 - **Zero-Allocation Focus**: Optimized hot paths and `sync.Pool` utilization to minimize heap allocations and pressure on the GC.
 - **Modern AWS SDK**: Uses AWS SDK for Go v2.
 - **Context Awareness**: Full support for `context.Context` for timeouts and cancellation.
@@ -165,6 +166,54 @@ if err != nil {
 
 // Or use the Validate method on a Sender or Receiver
 err = sender.Validate(context.Background(), "test@example.com")
+```
+
+### Outlook Compatibility
+
+Outlook uses Word for rendering, which has limited HTML/CSS support. You can enable Outlook compatibility mode to automatically inject necessary fixes (namespaces, MSO settings, meta tags, and CSS resets):
+
+```go
+email := gsmail.Email{
+    OutlookCompatible: true,
+}
+// All subsequent SetBody calls will now apply Outlook fixes
+email.SetBody("<html>...</html>", data)
+
+// Or use the shortcut method which sets the flag for you
+email.SetOutlookBody("<html>...</html>", data)
+```
+
+### Outlook Compatibility Helpers
+
+In addition to the automatic flag, `gsmail` provides helper functions to handle common Outlook layout issues:
+
+- `WrapInGhostTable(html, width, align)`: Wraps content in a conditional MSO table to enforce widths.
+- `MSOOnly(html)`: Content visible only in Outlook.
+- `HideFromMSO(html)`: Content hidden from Outlook.
+- `MSOButton(cfg)`: Generates a "bulletproof" VML button.
+- `MSOTable(width, align, style, content)`: Generates a normalized table with standard Outlook fixes.
+- `MSOImage(src, alt, width, height, style)`: Generates an image with Outlook fixes.
+- `MSOFontStack(fonts...)`: Returns a font stack with proper quoting for Outlook.
+- `MSOBackground(url, color, w, h, content)`: Generates a VML-based background for Outlook.
+- `MSOColumns(widths, cols...)`: Responsive side-by-side columns using ghost tables.
+- `MSOBulletList(items, bullet, style)`: Consistent bulleted lists (avoids Outlook <ul> issues).
+- `IsOutlookCompatible(html)`: Detects if HTML contains Outlook-specific fixes.
+
+`gsmail` also automatically injects Dark Mode support markers and CSS when Outlook compatibility is enabled, ensuring your emails look great in both light and dark themes.
+
+```go
+data := map[string]interface{}{
+    "Content": gsmail.WrapInGhostTable("<div>My Content</div>", "600", "center"),
+    "Button":  gsmail.MSOButton(gsmail.ButtonConfig{
+        Text: "Click Here",
+        Link: "https://example.com",
+        BgColor: "#007bff",
+    }),
+    "Image": gsmail.MSOImage("logo.png", "Logo", 200, 50, ""),
+    "Background": gsmail.MSOBackground("bg.png", "#f8f9fa", 600, 400, "<h1>Centered Text</h1>"),
+    "Columns": gsmail.MSOColumns([]int{300, 300}, "Left Content", "Right Content"),
+    "List": gsmail.MSOBulletList([]string{"Feature A", "Feature B"}, "✔", "color:green;"),
+}
 ```
 
 ### Connection Checking (Ping)
