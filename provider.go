@@ -19,7 +19,7 @@ type Receiver interface {
 // BaseProvider implements the Validate method common to all providers.
 type BaseProvider struct{}
 
-// Validate checks if the email address exists using the ValidateEmailExistence utility.
+// Validate performs comprehensive email validation: format check, disposable/temporary domain rejection, and existence verification (MX lookup + SMTP RCPT).
 func (BaseProvider) Validate(ctx context.Context, email string) error {
 	return ValidateEmailExistence(ctx, email)
 }

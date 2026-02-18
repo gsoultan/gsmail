@@ -5,11 +5,12 @@
 ## Features
 
 - **Pluggable Senders**: Send emails via standard SMTP (with SSL/TLS) or AWS SES.
+- **SMTP Connection Pooling**: Reuse connections for high-performance SMTP delivery.
 - **Pluggable Receivers**: Receive emails via POP3 and IMAP.
 - **Dynamic Templates**: Built-in support for `text/template` and `html/template`.
 - **Flexible Template Loading**: Load templates from strings, HTTP URLs, or AWS S3 compatible storage.
 - **Automatic Content Type Detection**: Automatically detects if an email is HTML or Plaintext based on the content.
-- **Email Validation**: Includes high-performance `IsValidEmail` (regex) and `ValidateEmailExistence` (MX/SMTP check) utilities.
+- **Email Validation**: Includes high-performance `IsValidEmail` (regex), `IsDisposableEmail`, and `ValidateEmailExistence` (MX/SMTP check + disposable/temporary email rejection) utilities.
 - **Attachments Support**: Send and receive multiple attachments with automatic MIME encoding/decoding.
 - **Outlook Compatibility**: Convert HTML templates to be compatible with Microsoft Outlook with a single flag.
 - **Zero-Allocation Focus**: Optimized hot paths and `sync.Pool` utilization to minimize heap allocations and pressure on the GC.
@@ -158,6 +159,9 @@ func main() {
 // Basic regex check
 isValid := gsmail.IsValidEmail("test@example.com")
 
+// Check if email is from a disposable/temporary provider
+isDisposable := gsmail.IsDisposableEmail("test@temp-mail.com")
+
 // Existence check (MX lookup + SMTP handshake)
 err := gsmail.ValidateEmailExistence(context.Background(), "test@example.com")
 if err != nil {
@@ -192,6 +196,7 @@ In addition to the automatic flag, `gsmail` provides helper functions to handle 
 - `HideFromMSO(html)`: Content hidden from Outlook.
 - `MSOButton(cfg)`: Generates a "bulletproof" VML button.
 - `MSOTable(width, align, style, content)`: Generates a normalized table with standard Outlook fixes.
+- `MSOSpacer(height)`: Generates a spacer row for consistent vertical spacing.
 - `MSOImage(src, alt, width, height, style)`: Generates an image with Outlook fixes.
 - `MSOFontStack(fonts...)`: Returns a font stack with proper quoting for Outlook.
 - `MSOBackground(url, color, w, h, content)`: Generates a VML-based background for Outlook.
@@ -231,6 +236,35 @@ if err != nil {
 err = receiver.Ping(context.Background())
 ```
 
+### SMTP Connection Pooling
+
+For high-volume email sending, you can enable connection pooling to reuse SMTP connections and reduce overhead.
+
+```go
+import (
+    "context"
+    "time"
+    "github.com/gsoultan/gsmail"
+    "github.com/gsoultan/gsmail/smtp"
+)
+
+func main() {
+    sender := smtp.NewSender("smtp.example.com", 587, "user", "pass", false)
+    
+    // Enable connection pooling
+    sender.EnablePool(smtp.PoolConfig{
+        MaxIdle:     10,                // Keep up to 10 idle connections
+        MaxOpen:     20,                // Limit total open connections to 20 (0 for unlimited)
+        IdleTimeout: 5 * time.Minute,   // Close connections idle for more than 5 minutes
+    })
+    defer sender.Close() // Closes all connections in the pool when done
+
+    // Use sender as usual
+    email := gsmail.Email{ /* ... */ }
+    err := gsmail.Send(context.Background(), sender, email)
+}
+```
+
 ## Performance Guidelines
 
 This library is designed for performance. To get the most out of it, use the recommended build flags:
@@ -241,20 +275,20 @@ go build -ldflags="-s -w" -gcflags="-m -l" .
 
 - `-s -w`: Reduces binary size by stripping debug symbols.
 - `-gcflags="-m -l"`: `-m` prints optimization decisions (like escape analysis) to help achieve zero allocations, and `-l` disables inlining if needed.
-+
-+## Benchmarks
-+
-+`gsmail` is optimized for high performance and low memory allocations. Below are the benchmark results for core utilities:
-+
-+```text
-+BenchmarkIsHTML-12                      160427133                7.527 ns/op          0 B/op           0 allocs/op
-+BenchmarkHasHeader-12                   35312084                36.48 ns/op           0 B/op           0 allocs/op
-+BenchmarkParseRawEmail-12                 344103              4371 ns/op           5400 B/op          15 allocs/op
-+BenchmarkParseRawEmailMultipart-12         60823             20156 ns/op          21045 B/op          75 allocs/op
-+```
-+
-+*Tested on: AMD Ryzen 5 5500U, Go 1.21+*
-+
- ## License
+
+## Benchmarks
+
+`gsmail` is optimized for high performance and low memory allocations. Below are the benchmark results for core utilities:
+
+```text
+BenchmarkIsHTML-12                      160427133                7.527 ns/op          0 B/op           0 allocs/op
+BenchmarkHasHeader-12                   35312084                36.48 ns/op           0 B/op           0 allocs/op
+BenchmarkParseRawEmail-12                 344103              4371 ns/op           5400 B/op          15 allocs/op
+BenchmarkParseRawEmailMultipart-12         60823             20156 ns/op          21045 B/op          75 allocs/op
+```
+
+*Tested on: AMD Ryzen 5 5500U, Go 1.25+*
+
+## License
 
 MIT

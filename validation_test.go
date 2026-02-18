@@ -97,4 +97,11 @@ func TestValidateEmailExistence(t *testing.T) {
 			t.Error("expected error for non-existent domain")
 		}
 	})
+
+	t.Run("DisposableDomain", func(t *testing.T) {
+		err := ValidateEmailExistence(context.Background(), "user@10minutemail.com")
+		if err == nil || !strings.Contains(err.Error(), "disposable") {
+			t.Errorf("expected disposable error, got: %v", err)
+		}
+	})
 }

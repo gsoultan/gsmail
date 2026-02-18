@@ -19,6 +19,7 @@ type Sender struct {
 	Username string
 	Password string
 	SSL      bool
+	Pool     *Pool
 }
 
 // NewSender creates a new SMTP provider.
@@ -43,11 +44,66 @@ func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
 	// Build the email message
 	gsmail.BuildMessage(bufPtr, email)
 
+	if p.Pool != nil {
+		client, err := p.Pool.Get(ctx)
+		if err != nil {
+			return err
+		}
+		err = p.sendOnClient(client, email.From, email.To, *bufPtr)
+		p.Pool.Put(client, err)
+		return err
+	}
+
 	if p.SSL {
 		return p.sendWithSSL(ctx, addr, auth, email.From, email.To, *bufPtr)
 	}
 
 	return p.sendPlain(ctx, addr, auth, email.From, email.To, *bufPtr)
+}
+
+// EnablePool enables the connection pool with the given configuration.
+func (p *Sender) EnablePool(config PoolConfig) {
+	p.Pool = NewPool(config, func(ctx context.Context) (*smtp.Client, error) {
+		addr := net.JoinHostPort(p.Host, fmt.Sprintf("%d", p.Port))
+		host, client, err := p.dial(ctx, addr, p.SSL)
+		if err != nil {
+			return nil, err
+		}
+
+		// Handle STARTTLS if not using SSL and it's supported
+		if !p.SSL {
+			if ok, _ := client.Extension("STARTTLS"); ok {
+				config := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+				if err = client.StartTLS(config); err != nil {
+					_ = client.Close()
+					return nil, fmt.Errorf("starttls: %w", err)
+				}
+			}
+		}
+
+		// Authenticate
+		if p.Username != "" {
+			auth := smtp.PlainAuth("", p.Username, p.Password, host)
+			if ok, _ := client.Extension("AUTH"); !ok {
+				_ = client.Close()
+				return nil, fmt.Errorf("smtp server does not support AUTH")
+			}
+			if err := client.Auth(auth); err != nil {
+				_ = client.Close()
+				return nil, fmt.Errorf("smtp auth: %w", err)
+			}
+		}
+
+		return client, nil
+	})
+}
+
+// Close closes the connection pool if it is enabled.
+func (p *Sender) Close() error {
+	if p.Pool != nil {
+		return p.Pool.Close()
+	}
+	return nil
 }
 
 // Ping checks the connection to the SMTP server.

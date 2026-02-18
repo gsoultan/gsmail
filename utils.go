@@ -205,6 +205,51 @@ func UnsafeBytesToString(b []byte) string {
 	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
+// Disposable domains set for spam prevention.
+var disposableDomainsSet = map[string]struct{}{
+	"10minutemail.com":   {},
+	"tempmail.org":       {},
+	"guerrillamail.com":  {},
+	"mailinator.com":     {},
+	"yopmail.com":        {},
+	"sharklasers.com":    {},
+	"getnada.com":        {},
+	"fakeinbox.com":      {},
+	"dispostable.com":    {},
+	"maildrop.cc":        {},
+	"throwawaymail.com":  {},
+	"tempmail.lol":       {},
+	"guerrillamail.info": {},
+	"emailondeck.com":    {},
+	"armyspy.com":        {},
+	"cuvox.de":           {},
+	"dayrep.com":         {},
+	"einrot.com":         {},
+	"fleckens.hu":        {},
+	"gustr.com":          {},
+	"hst.tk":             {},
+	"jemoch.com":         {},
+	"mailinater.com":     {},
+	"moakt.com":          {},
+	"rhyta.com":          {},
+	"superrito.com":      {},
+	"teleworm.us":        {},
+}
+
+func isDisposableDomain(domain string) bool {
+	d := strings.ToLower(domain)
+	_, exists := disposableDomainsSet[d]
+	return exists
+}
+
+func IsDisposableEmail(email string) bool {
+	i := strings.LastIndexByte(email, '@')
+	if i < 1 || i >= len(email)-1 {
+		return false
+	}
+	return isDisposableDomain(email[i+1:])
+}
+
 // IsValidEmail checks if the given string is a valid email address.
 // It uses a fast regex check and common sense length limits.
 func IsValidEmail(email string) bool {
@@ -219,6 +264,10 @@ func IsValidEmail(email string) bool {
 func ValidateEmailExistence(ctx context.Context, email string) error {
 	if !IsValidEmail(email) {
 		return fmt.Errorf("invalid email format")
+	}
+
+	if IsDisposableEmail(email) {
+		return fmt.Errorf("disposable/temporary email address not allowed")
 	}
 
 	parts := strings.Split(email, "@")
