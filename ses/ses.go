@@ -70,63 +70,67 @@ func (p *Sender) getClient(ctx context.Context) (*sesv2.Client, error) {
 
 // Ping checks the connection to AWS SES by getting the client.
 func (p *Sender) Ping(ctx context.Context) error {
-	client, err := p.getClient(ctx)
-	if err != nil {
-		return fmt.Errorf("ses ping: %w", err)
-	}
-	_, err = client.GetAccount(ctx, &sesv2.GetAccountInput{})
-	if err != nil {
-		return fmt.Errorf("ses get account: %w", err)
-	}
-	return nil
+	return gsmail.Retry(ctx, p.GetRetryConfig(), func() error {
+		client, err := p.getClient(ctx)
+		if err != nil {
+			return fmt.Errorf("ses ping: %w", err)
+		}
+		_, err = client.GetAccount(ctx, &sesv2.GetAccountInput{})
+		if err != nil {
+			return fmt.Errorf("ses get account: %w", err)
+		}
+		return nil
+	})
 }
 
 // Send sends an email using AWS SES.
 func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
-	client, err := p.getClient(ctx)
-	if err != nil {
-		return fmt.Errorf("get ses client: %w", err)
-	}
-
-	input := &sesv2.SendEmailInput{
-		FromEmailAddress: aws.String(email.From),
-		Destination: &types.Destination{
-			ToAddresses: email.To,
-		},
-		Content: &types.EmailContent{},
-	}
-
-	if len(email.Attachments) == 0 {
-		input.Content.Simple = &types.Message{
-			Subject: &types.Content{
-				Data: aws.String(email.Subject),
-			},
-			Body: &types.Body{},
+	return gsmail.Retry(ctx, p.GetRetryConfig(), func() error {
+		client, err := p.getClient(ctx)
+		if err != nil {
+			return fmt.Errorf("get ses client: %w", err)
 		}
-		if gsmail.IsHTML(email.Body) {
-			input.Content.Simple.Body.Html = &types.Content{
-				Data: aws.String(gsmail.UnsafeBytesToString(email.Body)),
+
+		input := &sesv2.SendEmailInput{
+			FromEmailAddress: aws.String(email.From),
+			Destination: &types.Destination{
+				ToAddresses: email.To,
+			},
+			Content: &types.EmailContent{},
+		}
+
+		if len(email.Attachments) == 0 {
+			input.Content.Simple = &types.Message{
+				Subject: &types.Content{
+					Data: aws.String(email.Subject),
+				},
+				Body: &types.Body{},
+			}
+			if gsmail.IsHTML(email.Body) {
+				input.Content.Simple.Body.Html = &types.Content{
+					Data: aws.String(gsmail.UnsafeBytesToString(email.Body)),
+				}
+			} else {
+				input.Content.Simple.Body.Text = &types.Content{
+					Data: aws.String(gsmail.UnsafeBytesToString(email.Body)),
+				}
 			}
 		} else {
-			input.Content.Simple.Body.Text = &types.Content{
-				Data: aws.String(gsmail.UnsafeBytesToString(email.Body)),
+			bufPtr := gsmail.GetBuffer()
+			defer gsmail.PutBuffer(bufPtr)
+
+			gsmail.BuildMessage(bufPtr, email)
+
+			input.Content.Raw = &types.RawMessage{
+				Data: *bufPtr,
 			}
 		}
-	} else {
-		bufPtr := gsmail.GetBuffer()
-		defer gsmail.PutBuffer(bufPtr)
 
-		gsmail.BuildMessage(bufPtr, email)
-
-		input.Content.Raw = &types.RawMessage{
-			Data: *bufPtr,
+		_, err = client.SendEmail(ctx, input)
+		if err != nil {
+			return fmt.Errorf("send email via ses: %w", err)
 		}
-	}
 
-	_, err = client.SendEmail(ctx, input)
-	if err != nil {
-		return fmt.Errorf("send email via ses: %w", err)
-	}
-
-	return nil
+		return nil
+	})
 }

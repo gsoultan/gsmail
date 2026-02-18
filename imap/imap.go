@@ -37,47 +37,59 @@ func NewReceiver(host string, port int, username, password string, ssl bool) *Re
 
 // Ping checks the connection to the IMAP server.
 func (f *Receiver) Ping(ctx context.Context) error {
-	addr := net.JoinHostPort(f.Host, fmt.Sprintf("%d", f.Port))
+	return gsmail.Retry(ctx, f.GetRetryConfig(), func() error {
+		addr := net.JoinHostPort(f.Host, fmt.Sprintf("%d", f.Port))
 
-	var conn net.Conn
-	var err error
-	d := net.Dialer{Timeout: 30 * time.Second}
-	conn, err = d.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return fmt.Errorf("imap dial: %w", err)
-	}
-
-	var c *client.Client
-	if f.SSL {
-		tlsConn := tls.Client(conn, &tls.Config{ServerName: f.Host, MinVersion: tls.VersionTLS12})
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			_ = tlsConn.Close()
-			return fmt.Errorf("imap tls handshake: %w", err)
-		}
-		c, err = client.New(tlsConn)
+		var conn net.Conn
+		var err error
+		d := net.Dialer{Timeout: 30 * time.Second}
+		conn, err = d.DialContext(ctx, "tcp", addr)
 		if err != nil {
-			_ = tlsConn.Close()
-			return fmt.Errorf("imap client new: %w", err)
+			return fmt.Errorf("imap dial: %w", err)
 		}
-	} else {
-		c, err = client.New(conn)
-		if err != nil {
-			_ = conn.Close()
-			return fmt.Errorf("imap client new: %w", err)
+
+		var c *client.Client
+		if f.SSL {
+			tlsConn := tls.Client(conn, &tls.Config{ServerName: f.Host, MinVersion: tls.VersionTLS12})
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				_ = tlsConn.Close()
+				return fmt.Errorf("imap tls handshake: %w", err)
+			}
+			c, err = client.New(tlsConn)
+			if err != nil {
+				_ = tlsConn.Close()
+				return fmt.Errorf("imap client new: %w", err)
+			}
+		} else {
+			c, err = client.New(conn)
+			if err != nil {
+				_ = conn.Close()
+				return fmt.Errorf("imap client new: %w", err)
+			}
 		}
-	}
 
-	defer func() { _ = c.Logout() }()
+		defer func() { _ = c.Logout() }()
 
-	if err := c.Noop(); err != nil {
-		return fmt.Errorf("imap noop: %w", err)
-	}
+		if err := c.Noop(); err != nil {
+			return fmt.Errorf("imap noop: %w", err)
+		}
 
-	return nil
+		return nil
+	})
 }
 
 // Receive retrieves emails using IMAP.
 func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, error) {
+	var emails []gsmail.Email
+	err := gsmail.Retry(ctx, f.GetRetryConfig(), func() error {
+		var err error
+		emails, err = f.receive(ctx, limit)
+		return err
+	})
+	return emails, err
+}
+
+func (f *Receiver) receive(ctx context.Context, limit int) ([]gsmail.Email, error) {
 	addr := net.JoinHostPort(f.Host, fmt.Sprintf("%d", f.Port))
 
 	var conn net.Conn
@@ -132,10 +144,23 @@ func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 	seqset := new(goimap.SeqSet)
 	seqset.AddRange(end, start)
 
-	messages := make(chan *goimap.Message, limit)
+	type indexedMessage struct {
+		idx int
+		msg *goimap.Message
+	}
+	messages := make(chan indexedMessage, limit)
 	done := make(chan error, 1)
+	fetchMessages := make(chan *goimap.Message, limit)
 	go func() {
-		done <- c.Fetch(seqset, []goimap.FetchItem{goimap.FetchRFC822}, messages)
+		done <- c.Fetch(seqset, []goimap.FetchItem{goimap.FetchRFC822}, fetchMessages)
+	}()
+	count := 0
+	go func() {
+		defer close(messages)
+		for msg := range fetchMessages {
+			messages <- indexedMessage{idx: count, msg: msg}
+			count++
+		}
 	}()
 
 	type result struct {
@@ -146,29 +171,44 @@ func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 	results := make(chan result, limit)
 	var wg sync.WaitGroup
 
-	// Use a small worker pool or just spawn for each to process concurrently
-	// Since limit is usually small, spawning per message is fine, but we should be careful.
-	// For high performance, we'll use a semaphore-like approach or just processing as they come.
+	// Fixed worker pool for production readiness
+	numWorkers := 10
+	if limit < numWorkers {
+		numWorkers = limit
+	}
 
-	count := 0
-	for msg := range messages {
+	for w := 0; w < numWorkers; w++ {
 		wg.Add(1)
-		go func(m *goimap.Message, idx int) {
+		go func() {
 			defer wg.Done()
-			for _, literal := range m.Body {
-				raw, err := io.ReadAll(literal)
-				if err != nil {
-					results <- result{err: fmt.Errorf("imap read body: %w", err)}
+			for res := range messages {
+				// Check context cancellation
+				select {
+				case <-ctx.Done():
 					return
+				default:
 				}
-				email, err := gsmail.ParseRawEmail(raw)
-				if err != nil {
+
+				m := res.msg
+				if m == nil {
 					continue
 				}
-				results <- result{index: idx, email: email}
+
+				for _, literal := range m.Body {
+					raw, err := io.ReadAll(literal)
+					if err != nil {
+						results <- result{err: fmt.Errorf("imap read body: %w", err)}
+						continue
+					}
+
+					email, err := gsmail.ParseRawEmail(raw)
+					if err != nil {
+						continue
+					}
+					results <- result{index: res.idx, email: email}
+				}
 			}
-		}(msg, count)
-		count++
+		}()
 	}
 
 	go func() {

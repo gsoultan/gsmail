@@ -3,7 +3,6 @@ package pop3
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/gsoultan/gsmail"
 	gopop3 "github.com/knadh/go-pop3"
@@ -32,27 +31,39 @@ func NewReceiver(host string, port int, username, password string, ssl bool) *Re
 
 // Ping checks the connection to the POP3 server.
 func (f *Receiver) Ping(ctx context.Context) error {
-	p := gopop3.New(gopop3.Opt{
-		Host:       f.Host,
-		Port:       f.Port,
-		TLSEnabled: f.SSL,
+	return gsmail.Retry(ctx, f.GetRetryConfig(), func() error {
+		p := gopop3.New(gopop3.Opt{
+			Host:       f.Host,
+			Port:       f.Port,
+			TLSEnabled: f.SSL,
+		})
+
+		conn, err := p.NewConn()
+		if err != nil {
+			return fmt.Errorf("pop3 dial: %w", err)
+		}
+		defer func() { _ = conn.Quit() }()
+
+		if err := conn.Noop(); err != nil {
+			return fmt.Errorf("pop3 noop: %w", err)
+		}
+
+		return nil
 	})
-
-	conn, err := p.NewConn()
-	if err != nil {
-		return fmt.Errorf("pop3 dial: %w", err)
-	}
-	defer func() { _ = conn.Quit() }()
-
-	if err := conn.Noop(); err != nil {
-		return fmt.Errorf("pop3 noop: %w", err)
-	}
-
-	return nil
 }
 
 // Receive retrieves emails using POP3.
 func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, error) {
+	var emails []gsmail.Email
+	err := gsmail.Retry(ctx, f.GetRetryConfig(), func() error {
+		var err error
+		emails, err = f.receive(ctx, limit)
+		return err
+	})
+	return emails, err
+}
+
+func (f *Receiver) receive(ctx context.Context, limit int) ([]gsmail.Email, error) {
 	p := gopop3.New(gopop3.Opt{
 		Host:       f.Host,
 		Port:       f.Port,
@@ -84,65 +95,27 @@ func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 		end = 1
 	}
 
-	type result struct {
-		index int
-		email gsmail.Email
-		err   error
-	}
-
-	results := make(chan result, start-end+1)
-	var wg sync.WaitGroup
-
+	emails := make([]gsmail.Email, 0, start-end+1)
 	for i := start; i >= end; i-- {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			// Check context cancellation
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			// RetrRaw returns a *bytes.Buffer
-			buf, err := conn.RetrRaw(idx)
-			if err != nil {
-				results <- result{err: fmt.Errorf("pop3 retr %d: %w", idx, err)}
-				return
-			}
-
-			email, err := gsmail.ParseRawEmail(buf.Bytes())
-			if err != nil {
-				return
-			}
-			results <- result{index: idx, email: email}
-		}(i)
-	}
-
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	emailsMap := make(map[int]gsmail.Email)
-	var fetchErr error
-	for res := range results {
-		if res.err != nil {
-			fetchErr = res.err
-		} else {
-			emailsMap[res.index] = res.email
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			return emails, ctx.Err()
+		default:
 		}
-	}
 
-	emails := make([]gsmail.Email, 0, len(emailsMap))
-	for i := start; i >= end; i-- {
-		if email, ok := emailsMap[i]; ok {
-			emails = append(emails, email)
+		// RetrRaw returns a *bytes.Buffer.
+		// POP3 connections are sequential and not thread-safe.
+		buf, err := conn.RetrRaw(i)
+		if err != nil {
+			return emails, fmt.Errorf("pop3 retr %d: %w", i, err)
 		}
-	}
 
-	if fetchErr != nil {
-		return emails, fetchErr
+		email, err := gsmail.ParseRawEmail(buf.Bytes())
+		if err != nil {
+			continue
+		}
+		emails = append(emails, email)
 	}
 
 	return emails, nil

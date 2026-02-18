@@ -17,11 +17,17 @@ const (
 
 // Send sends an email using the specified sender.
 func Send(ctx context.Context, s Sender, email Email) error {
+	if s == nil {
+		return fmt.Errorf("sender is nil")
+	}
 	return s.Send(ctx, email)
 }
 
 // Receive retrieves emails using the specified fetcher.
 func Receive(ctx context.Context, f Receiver, limit int) ([]Email, error) {
+	if f == nil {
+		return nil, fmt.Errorf("receiver is nil")
+	}
 	return f.Receive(ctx, limit)
 }
 

@@ -44,21 +44,23 @@ func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
 	// Build the email message
 	gsmail.BuildMessage(bufPtr, email)
 
-	if p.Pool != nil {
-		client, err := p.Pool.Get(ctx)
-		if err != nil {
+	return gsmail.Retry(ctx, p.GetRetryConfig(), func() error {
+		if p.Pool != nil {
+			client, err := p.Pool.Get(ctx)
+			if err != nil {
+				return err
+			}
+			err = p.sendOnClient(client, email.From, email.To, *bufPtr)
+			p.Pool.Put(client, err)
 			return err
 		}
-		err = p.sendOnClient(client, email.From, email.To, *bufPtr)
-		p.Pool.Put(client, err)
-		return err
-	}
 
-	if p.SSL {
-		return p.sendWithSSL(ctx, addr, auth, email.From, email.To, *bufPtr)
-	}
+		if p.SSL {
+			return p.sendWithSSL(ctx, addr, auth, email.From, email.To, *bufPtr)
+		}
 
-	return p.sendPlain(ctx, addr, auth, email.From, email.To, *bufPtr)
+		return p.sendPlain(ctx, addr, auth, email.From, email.To, *bufPtr)
+	})
 }
 
 // EnablePool enables the connection pool with the given configuration.
@@ -108,18 +110,20 @@ func (p *Sender) Close() error {
 
 // Ping checks the connection to the SMTP server.
 func (p *Sender) Ping(ctx context.Context) error {
-	addr := net.JoinHostPort(p.Host, fmt.Sprintf("%d", p.Port))
-	_, client, err := p.dial(ctx, addr, p.SSL)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
+	return gsmail.Retry(ctx, p.GetRetryConfig(), func() error {
+		addr := net.JoinHostPort(p.Host, fmt.Sprintf("%d", p.Port))
+		_, client, err := p.dial(ctx, addr, p.SSL)
+		if err != nil {
+			return err
+		}
+		defer client.Close()
 
-	if err := client.Noop(); err != nil {
-		return fmt.Errorf("smtp noop: %w", err)
-	}
+		if err := client.Noop(); err != nil {
+			return fmt.Errorf("smtp noop: %w", err)
+		}
 
-	return client.Quit()
+		return client.Quit()
+	})
 }
 
 func (p *Sender) sendOnClient(client *smtp.Client, from string, to []string, msg []byte) error {
