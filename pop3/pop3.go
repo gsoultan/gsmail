@@ -2,30 +2,39 @@ package pop3
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 
+	sasl "github.com/emersion/go-sasl"
 	"github.com/gsoultan/gsmail"
 	gopop3 "github.com/knadh/go-pop3"
 )
 
-// Receiver represents the POP3 server configuration.
+// Receiver represents the POP3 server configuration and implements the Receiver interface.
 type Receiver struct {
 	gsmail.BaseProvider
-	Host     string
-	Port     int
-	Username string
-	Password string
-	SSL      bool
+	Host               string
+	Port               int
+	Username           string
+	Password           string
+	SSL                bool
+	InsecureSkipVerify bool
+
+	// Modern auth (POP3 XOAUTH2 is not supported by this client)
+	AuthMethod        gsmail.AuthMethod
+	TokenSource       gsmail.TokenSource
+	AllowInsecureAuth bool
 }
 
 // NewReceiver creates a new POP3 receiver.
 func NewReceiver(host string, port int, username, password string, ssl bool) *Receiver {
 	return &Receiver{
-		Host:     host,
-		Port:     port,
-		Username: username,
-		Password: password,
-		SSL:      ssl,
+		Host:               host,
+		Port:               port,
+		Username:           username,
+		Password:           password,
+		SSL:                ssl,
+		InsecureSkipVerify: false,
 	}
 }
 
@@ -52,6 +61,21 @@ func (f *Receiver) Ping(ctx context.Context) error {
 	})
 }
 
+// Search is not supported by POP3.
+func (f *Receiver) Search(ctx context.Context, options gsmail.SearchOptions, limit int) ([]gsmail.Email, error) {
+	return nil, fmt.Errorf("search not supported by POP3")
+}
+
+// Idle is not supported by POP3.
+func (f *Receiver) Idle(ctx context.Context) (<-chan gsmail.Email, <-chan error) {
+	emailChan := make(chan gsmail.Email)
+	errChan := make(chan error, 1)
+	close(emailChan)
+	errChan <- fmt.Errorf("idle not supported by POP3")
+	close(errChan)
+	return emailChan, errChan
+}
+
 // Receive retrieves emails using POP3.
 func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, error) {
 	var emails []gsmail.Email
@@ -76,8 +100,42 @@ func (f *Receiver) receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 	}
 	defer func() { _ = conn.Quit() }()
 
-	if err := conn.Auth(f.Username, f.Password); err != nil {
-		return nil, fmt.Errorf("pop3 auth: %w", err)
+	// Authenticate
+	if f.AuthMethod == gsmail.AuthXOAUTH2 || f.AuthMethod == gsmail.AuthOAUTHBEARER {
+		if !f.SSL && !f.AllowInsecureAuth {
+			return nil, fmt.Errorf("pop3 oauth2 requires TLS; enable SSL or AllowInsecureAuth for testing")
+		}
+		if f.TokenSource == nil {
+			return nil, fmt.Errorf("pop3 oauth2 token source is nil")
+		}
+		tok, err := f.TokenSource(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("pop3 token source: %w", err)
+		}
+
+		var authClient sasl.Client
+		if f.AuthMethod == gsmail.AuthXOAUTH2 {
+			authClient = gsmail.NewXOAUTH2Client(f.Username, tok)
+		} else {
+			authClient = sasl.NewOAuthBearerClient(&sasl.OAuthBearerOptions{Username: f.Username, Token: tok})
+		}
+
+		mech, ir, err := authClient.Start()
+		if err != nil {
+			return nil, fmt.Errorf("sasl start: %w", err)
+		}
+
+		ir64 := base64.StdEncoding.EncodeToString(ir)
+		// POP3 AUTH mechanism [initial-response]
+		// Use false for isMulti as AUTH mechanism is not expected to return multiline response
+		_, err = conn.Cmd("AUTH", false, mech, ir64)
+		if err != nil {
+			return nil, fmt.Errorf("pop3 authenticate: %w", err)
+		}
+	} else {
+		if err := conn.Auth(f.Username, f.Password); err != nil {
+			return nil, fmt.Errorf("pop3 auth: %w", err)
+		}
 	}
 
 	count, _, err := conn.Stat()

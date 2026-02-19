@@ -31,9 +31,20 @@ type Sender interface {
 	SetRetryConfig(config RetryConfig)
 }
 
+// SearchOptions defines the criteria for searching emails.
+type SearchOptions struct {
+	From    string
+	Subject string
+	Since   time.Time
+	Before  time.Time
+	Unseen  bool
+}
+
 // Receiver defines the interface for different email receiving methods.
 type Receiver interface {
 	Receive(ctx context.Context, limit int) ([]Email, error)
+	Search(ctx context.Context, options SearchOptions, limit int) ([]Email, error)
+	Idle(ctx context.Context) (<-chan Email, <-chan error)
 	Validate(ctx context.Context, email string) error
 	Ping(ctx context.Context) error
 	SetRetryConfig(config RetryConfig)

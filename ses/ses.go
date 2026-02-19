@@ -23,6 +23,9 @@ type Sender struct {
 
 	mu     sync.RWMutex
 	client *sesv2.Client
+
+	// Deliverability
+	DKIMConfig *gsmail.DKIMOptions
 }
 
 // NewSender creates a new AWS SES provider.
@@ -94,25 +97,38 @@ func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
 		input := &sesv2.SendEmailInput{
 			FromEmailAddress: aws.String(email.From),
 			Destination: &types.Destination{
-				ToAddresses: email.To,
+				ToAddresses:  email.To,
+				CcAddresses:  email.Cc,
+				BccAddresses: email.Bcc,
 			},
 			Content: &types.EmailContent{},
 		}
 
-		if len(email.Attachments) == 0 {
+		if email.ReplyTo != "" {
+			input.ReplyToAddresses = []string{email.ReplyTo}
+		}
+
+		hasAttachments := len(email.Attachments) > 0
+		hasBothBodies := len(email.Body) > 0 && len(email.HTMLBody) > 0
+
+		if !hasAttachments && !hasBothBodies {
 			input.Content.Simple = &types.Message{
 				Subject: &types.Content{
 					Data: aws.String(email.Subject),
 				},
 				Body: &types.Body{},
 			}
-			if gsmail.IsHTML(email.Body) {
+			body := email.Body
+			if len(body) == 0 && len(email.HTMLBody) > 0 {
+				body = email.HTMLBody
+			}
+			if gsmail.IsHTML(body) {
 				input.Content.Simple.Body.Html = &types.Content{
-					Data: aws.String(gsmail.UnsafeBytesToString(email.Body)),
+					Data: aws.String(gsmail.UnsafeBytesToString(body)),
 				}
 			} else {
 				input.Content.Simple.Body.Text = &types.Content{
-					Data: aws.String(gsmail.UnsafeBytesToString(email.Body)),
+					Data: aws.String(gsmail.UnsafeBytesToString(body)),
 				}
 			}
 		} else {
@@ -120,6 +136,15 @@ func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
 			defer gsmail.PutBuffer(bufPtr)
 
 			gsmail.BuildMessage(bufPtr, email)
+
+			// DKIM Signing for raw messages
+			if p.DKIMConfig != nil {
+				signed, err := gsmail.SignDKIM(*bufPtr, *p.DKIMConfig)
+				if err != nil {
+					return fmt.Errorf("dkim sign: %w", err)
+				}
+				*bufPtr = signed
+			}
 
 			input.Content.Raw = &types.RawMessage{
 				Data: *bufPtr,

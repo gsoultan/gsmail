@@ -14,29 +14,44 @@ import (
 // Sender represents the SMTP server configuration and implements the Sender interface.
 type Sender struct {
 	gsmail.BaseProvider
-	Host     string
-	Port     int
-	Username string
-	Password string
-	SSL      bool
-	Pool     *Pool
+	Host               string
+	Port               int
+	Username           string
+	Password           string
+	SSL                bool
+	InsecureSkipVerify bool
+	Pool               *Pool
+
+	// Modern auth
+	AuthMethod        gsmail.AuthMethod
+	TokenSource       gsmail.TokenSource // provides OAuth2 bearer token when AuthMethod is XOAUTH2 or OAUTHBEARER
+	AllowInsecureAuth bool               // allow AUTH without TLS (NOT recommended); default false
+
+	// Deliverability
+	DKIMConfig *gsmail.DKIMOptions
 }
 
 // NewSender creates a new SMTP provider.
 func NewSender(host string, port int, username, password string, ssl bool) *Sender {
 	return &Sender{
-		Host:     host,
-		Port:     port,
-		Username: username,
-		Password: password,
-		SSL:      ssl,
+		Host:               host,
+		Port:               port,
+		Username:           username,
+		Password:           password,
+		SSL:                ssl,
+		InsecureSkipVerify: false,
 	}
+}
+
+// UseOAuth configures the sender to use OAuth2 with the specified method and token source.
+func (p *Sender) UseOAuth(method gsmail.AuthMethod, ts gsmail.TokenSource) {
+	p.AuthMethod = method
+	p.TokenSource = ts
 }
 
 // Send sends an email using the SMTP configuration.
 func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
 	addr := net.JoinHostPort(p.Host, fmt.Sprintf("%d", p.Port))
-	auth := smtp.PlainAuth("", p.Username, p.Password, p.Host)
 
 	bufPtr := gsmail.GetBuffer()
 	defer gsmail.PutBuffer(bufPtr)
@@ -44,22 +59,58 @@ func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
 	// Build the email message
 	gsmail.BuildMessage(bufPtr, email)
 
+	// DKIM Signing
+	if p.DKIMConfig != nil {
+		signed, err := gsmail.SignDKIM(*bufPtr, *p.DKIMConfig)
+		if err != nil {
+			return fmt.Errorf("dkim sign: %w", err)
+		}
+		*bufPtr = signed
+	}
+
+	// Collect all recipients
+	recipients := make([]string, 0, len(email.To)+len(email.Cc)+len(email.Bcc))
+	recipients = append(recipients, email.To...)
+	recipients = append(recipients, email.Cc...)
+	recipients = append(recipients, email.Bcc...)
+
 	return gsmail.Retry(ctx, p.GetRetryConfig(), func() error {
 		if p.Pool != nil {
 			client, err := p.Pool.Get(ctx)
 			if err != nil {
 				return err
 			}
-			err = p.sendOnClient(client, email.From, email.To, *bufPtr)
+			err = p.sendOnClient(client, email.From, recipients, *bufPtr)
 			p.Pool.Put(client, err)
 			return err
 		}
 
-		if p.SSL {
-			return p.sendWithSSL(ctx, addr, auth, email.From, email.To, *bufPtr)
+		// Build auth on demand
+		var auth smtp.Auth
+		var isOAuth bool
+		if p.AuthMethod == gsmail.AuthXOAUTH2 || p.AuthMethod == gsmail.AuthOAUTHBEARER {
+			isOAuth = true
+			if p.TokenSource == nil {
+				return fmt.Errorf("oauth2 token source is nil")
+			}
+			tok, err := p.TokenSource(ctx)
+			if err != nil {
+				return fmt.Errorf("token source: %w", err)
+			}
+			if p.AuthMethod == gsmail.AuthXOAUTH2 {
+				auth = gsmail.NewXOAUTH2Auth(p.Username, tok)
+			} else {
+				auth = gsmail.NewOAuthBearerAuth(p.Username, tok)
+			}
+		} else if p.Username != "" {
+			auth = smtp.PlainAuth("", p.Username, p.Password, p.Host)
 		}
 
-		return p.sendPlain(ctx, addr, auth, email.From, email.To, *bufPtr)
+		if p.SSL {
+			return p.sendWithSSL(ctx, addr, auth, email.From, recipients, *bufPtr)
+		}
+
+		return p.sendPlain(ctx, addr, auth, email.From, recipients, *bufPtr, isOAuth)
 	})
 }
 
@@ -73,19 +124,48 @@ func (p *Sender) EnablePool(config PoolConfig) {
 		}
 
 		// Handle STARTTLS if not using SSL and it's supported
+		tlsOn := p.SSL
 		if !p.SSL {
 			if ok, _ := client.Extension("STARTTLS"); ok {
-				config := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+				config := &tls.Config{
+					ServerName:         host,
+					MinVersion:         tls.VersionTLS12,
+					InsecureSkipVerify: p.InsecureSkipVerify,
+				}
 				if err = client.StartTLS(config); err != nil {
 					_ = client.Close()
 					return nil, fmt.Errorf("starttls: %w", err)
 				}
+				tlsOn = true
 			}
 		}
 
-		// Authenticate
-		if p.Username != "" {
-			auth := smtp.PlainAuth("", p.Username, p.Password, host)
+		// Authenticate if configured
+		var auth smtp.Auth
+		if p.AuthMethod == gsmail.AuthXOAUTH2 || p.AuthMethod == gsmail.AuthOAUTHBEARER {
+			if !tlsOn && !p.AllowInsecureAuth {
+				_ = client.Close()
+				return nil, fmt.Errorf("oauth2 requires TLS; enable SSL/STARTTLS or AllowInsecureAuth for testing")
+			}
+			if p.TokenSource == nil {
+				_ = client.Close()
+				return nil, fmt.Errorf("oauth2 token source is nil")
+			}
+			tok, err := p.TokenSource(ctx)
+			if err != nil {
+				_ = client.Close()
+				return nil, fmt.Errorf("token source: %w", err)
+			}
+			if p.AuthMethod == gsmail.AuthXOAUTH2 {
+				auth = gsmail.NewXOAUTH2Auth(p.Username, tok)
+			} else {
+				auth = gsmail.NewOAuthBearerAuth(p.Username, tok)
+			}
+		} else if p.Username != "" {
+			auth = smtp.PlainAuth("", p.Username, p.Password, host)
+		}
+
+		if auth != nil {
 			if ok, _ := client.Extension("AUTH"); !ok {
 				_ = client.Close()
 				return nil, fmt.Errorf("smtp server does not support AUTH")
@@ -171,18 +251,28 @@ func (p *Sender) authenticateAndSend(client *smtp.Client, auth smtp.Auth, from s
 	return p.sendOnClient(client, from, to, msg)
 }
 
-func (p *Sender) sendPlain(ctx context.Context, addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
+func (p *Sender) sendPlain(ctx context.Context, addr string, auth smtp.Auth, from string, to []string, msg []byte, requireTLS bool) error {
 	host, client, err := p.dial(ctx, addr, false)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
+	tlsOn := false
 	if ok, _ := client.Extension("STARTTLS"); ok {
-		config := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+		config := &tls.Config{
+			ServerName:         host,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: p.InsecureSkipVerify,
+		}
 		if err = client.StartTLS(config); err != nil {
 			return fmt.Errorf("starttls: %w", err)
 		}
+		tlsOn = true
+	}
+
+	if requireTLS && !tlsOn && !p.AllowInsecureAuth {
+		return fmt.Errorf("oauth2 requires TLS; enable SSL/STARTTLS or AllowInsecureAuth for testing")
 	}
 
 	if err = p.authenticateAndSend(client, auth, from, to, msg); err != nil {
@@ -206,7 +296,11 @@ func (p *Sender) dial(ctx context.Context, addr string, useSSL bool) (string, *s
 	}
 
 	if useSSL {
-		tlsConn := tls.Client(conn, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
+		tlsConn := tls.Client(conn, &tls.Config{
+			ServerName:         host,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: p.InsecureSkipVerify,
+		})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			_ = tlsConn.Close()
 			return "", nil, fmt.Errorf("tls handshake: %w", err)

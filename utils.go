@@ -3,6 +3,7 @@ package gsmail
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -25,8 +26,9 @@ var (
 	dialer     = &net.Dialer{
 		Timeout: 5 * time.Second,
 	}
-	smtpPort = "25"
-	lookupMX = net.DefaultResolver.LookupMX
+	smtpPort  = "25"
+	lookupMX  = net.DefaultResolver.LookupMX
+	lookupTXT = net.DefaultResolver.LookupTXT
 )
 
 const (
@@ -44,7 +46,7 @@ var (
 	}
 
 	bufferPool = sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			b := make([]byte, 0, 1024)
 			return &b
 		},
@@ -333,13 +335,21 @@ func ParseRawEmail(raw []byte) (Email, error) {
 		return Email{}, fmt.Errorf("read message: %w", err)
 	}
 
+	dec := new(mime.WordDecoder)
+	subject, _ := dec.DecodeHeader(msg.Header.Get("Subject"))
+
 	email := Email{
 		From:    msg.Header.Get("From"),
-		Subject: msg.Header.Get("Subject"),
+		Subject: subject,
+		ReplyTo: msg.Header.Get("Reply-To"),
 	}
 
 	if to := msg.Header.Get("To"); to != "" {
 		email.To = parseAddressList(to)
+	}
+
+	if cc := msg.Header.Get("Cc"); cc != "" {
+		email.Cc = parseAddressList(cc)
 	}
 
 	contentType := msg.Header.Get("Content-Type")
@@ -397,6 +407,7 @@ func processPart(email *Email, part *multipart.Part) error {
 	contentType := part.Header.Get("Content-Type")
 	mediaType, params, _ := mime.ParseMediaType(contentType)
 	disposition, dispParams, _ := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+	contentID := strings.Trim(part.Header.Get("Content-ID"), "<>")
 
 	if strings.HasPrefix(mediaType, "multipart/") {
 		return parseMultipart(email, part, params["boundary"])
@@ -408,7 +419,7 @@ func processPart(email *Email, part *multipart.Part) error {
 	}
 
 	filename := dispParams["filename"]
-	isAttachment := disposition == "attachment" || filename != ""
+	isAttachment := disposition == "attachment" || disposition == "inline" || filename != ""
 
 	if isAttachment {
 		if filename == "" {
@@ -417,15 +428,19 @@ func processPart(email *Email, part *multipart.Part) error {
 		email.Attachments = append(email.Attachments, Attachment{
 			Filename:    filename,
 			ContentType: contentType,
+			ContentID:   contentID,
 			Data:        data,
 		})
 		return nil
 	}
 
-	if mediaType == "text/plain" || mediaType == "text/html" {
-		if len(email.Body) == 0 || mediaType == "text/html" {
-			email.Body = data
-		}
+	if mediaType == "text/plain" {
+		email.Body = data
+		return nil
+	}
+
+	if mediaType == "text/html" {
+		email.HTMLBody = data
 		return nil
 	}
 
@@ -433,6 +448,7 @@ func processPart(email *Email, part *multipart.Part) error {
 	email.Attachments = append(email.Attachments, Attachment{
 		Filename:    filename,
 		ContentType: contentType,
+		ContentID:   contentID,
 		Data:        data,
 	})
 	return nil
@@ -450,6 +466,41 @@ func decodePart(r io.Reader, encoding string) ([]byte, error) {
 	return io.ReadAll(decoder)
 }
 
+func generateMessageID(from string) string {
+	domain := "gsmail.local"
+	if a, err := mail.ParseAddress(from); err == nil {
+		parts := strings.Split(a.Address, "@")
+		if len(parts) > 1 {
+			domain = parts[1]
+		}
+	}
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("<%x@%s>", b, domain)
+}
+
+func formatAddresses(addresses []string) string {
+	var formatted []string
+	for _, addr := range addresses {
+		if a, err := mail.ParseAddress(addr); err == nil {
+			formatted = append(formatted, a.String())
+		} else {
+			formatted = append(formatted, addr)
+		}
+	}
+	return strings.Join(formatted, ", ")
+}
+
+func encodeHeader(s string) string {
+	// Only encode if contains non-ASCII characters
+	for i := range len(s) {
+		if s[i] > 127 {
+			return mime.QEncoding.Encode("UTF-8", s)
+		}
+	}
+	return s
+}
+
 // BuildMessage builds the full RFC822 email message into the provided buffer.
 func BuildMessage(bufPtr *[]byte, email Email) {
 	writer := NewBufferWriter(bufPtr)
@@ -458,7 +509,7 @@ func BuildMessage(bufPtr *[]byte, email Email) {
 	}
 
 	writeHeader := func(key, value string) {
-		if !HasHeader(email.Body, key) {
+		if value != "" && !HasHeader(*bufPtr, key) {
 			write(key)
 			write(": ")
 			write(value)
@@ -466,25 +517,51 @@ func BuildMessage(bufPtr *[]byte, email Email) {
 		}
 	}
 
-	writeHeader("From", email.From)
+	// Basic headers
+	fromAddr := email.From
+	if a, err := mail.ParseAddress(fromAddr); err == nil {
+		fromAddr = a.String()
+	}
+	writeHeader("From", fromAddr)
 
-	if !HasHeader(email.Body, "To") {
-		write("To: ")
-		for i, to := range email.To {
-			if i > 0 {
-				write(", ")
-			}
-			write(to)
-		}
-		write("\r\n")
+	if !HasHeader(*bufPtr, "To") && len(email.To) > 0 {
+		writeHeader("To", formatAddresses(email.To))
 	}
 
-	writeHeader("Subject", email.Subject)
+	if len(email.Cc) > 0 {
+		writeHeader("Cc", formatAddresses(email.Cc))
+	}
+
+	if email.ReplyTo != "" {
+		writeHeader("Reply-To", formatAddresses([]string{email.ReplyTo}))
+	}
+
+	writeHeader("Subject", encodeHeader(email.Subject))
 	writeHeader("MIME-Version", "1.0")
 
-	if len(email.Attachments) == 0 {
-		if !HasHeader(email.Body, "Content-Type") {
-			if IsHTML(email.Body) {
+	if !HasHeader(*bufPtr, "Date") {
+		writeHeader("Date", time.Now().Format(time.RFC1123Z))
+	}
+
+	if !HasHeader(*bufPtr, "Message-ID") {
+		writeHeader("Message-ID", generateMessageID(email.From))
+	}
+
+	hasAttachments := len(email.Attachments) > 0
+	hasBothBodies := len(email.Body) > 0 && len(email.HTMLBody) > 0
+
+	// Determine the main body to use if only one is provided
+	mainBody := email.Body
+	isHTML := IsHTML(mainBody)
+	if len(mainBody) == 0 && len(email.HTMLBody) > 0 {
+		mainBody = email.HTMLBody
+		isHTML = true
+	}
+
+	if !hasAttachments && !hasBothBodies {
+		// Simple message
+		if !HasHeader(*bufPtr, "Content-Type") {
+			if isHTML {
 				write(HeaderHTML)
 			} else {
 				write(HeaderPlain)
@@ -492,47 +569,104 @@ func BuildMessage(bufPtr *[]byte, email Email) {
 			write("\r\n")
 		}
 		write("\r\n")
-		_, _ = writer.Write(email.Body)
+		_, _ = writer.Write(mainBody)
 		write("\r\n")
 		return
 	}
 
-	// Multipart message
-	mw := multipart.NewWriter(writer)
-	writeHeader("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
-	write("\r\n")
+	var mw *multipart.Writer
 
-	// Body part
-	bodyHeader := make(textproto.MIMEHeader)
-	contentType := "text/plain; charset=\"UTF-8\""
-	if IsHTML(email.Body) {
-		contentType = "text/html; charset=\"UTF-8\""
+	if hasAttachments {
+		mw = multipart.NewWriter(writer)
+		writeHeader("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
+		write("\r\n")
+	} else if hasBothBodies {
+		mw = multipart.NewWriter(writer)
+		writeHeader("Content-Type", "multipart/alternative; boundary="+mw.Boundary())
+		write("\r\n")
 	}
-	bodyHeader.Set("Content-Type", contentType)
-	bodyHeader.Set("Content-Transfer-Encoding", "base64")
 
-	part, _ := mw.CreatePart(bodyHeader)
-	b64Writer := base64.NewEncoder(base64.StdEncoding, part)
-	_, _ = b64Writer.Write(email.Body)
-	_ = b64Writer.Close()
+	// Write bodies
+	if hasBothBodies {
+		var amw *multipart.Writer
+		if hasAttachments {
+			// multipart/alternative inside multipart/mixed
+			altHeader := make(textproto.MIMEHeader)
+			// We need a new boundary for the alternative part
+			tempMw := multipart.NewWriter(io.Discard)
+			altBoundary := tempMw.Boundary()
+			altHeader.Set("Content-Type", "multipart/alternative; boundary="+altBoundary)
+			part, _ := mw.CreatePart(altHeader)
+			amw = multipart.NewWriter(part)
+			amw.SetBoundary(altBoundary)
+		} else {
+			amw = mw
+		}
+
+		// Plain text part
+		textHeader := make(textproto.MIMEHeader)
+		textHeader.Set("Content-Type", "text/plain; charset=\"UTF-8\"")
+		textHeader.Set("Content-Transfer-Encoding", "base64")
+		textPart, _ := amw.CreatePart(textHeader)
+		b64Text := base64.NewEncoder(base64.StdEncoding, textPart)
+		_, _ = b64Text.Write(email.Body)
+		_ = b64Text.Close()
+
+		// HTML part
+		htmlHeader := make(textproto.MIMEHeader)
+		htmlHeader.Set("Content-Type", "text/html; charset=\"UTF-8\"")
+		htmlHeader.Set("Content-Transfer-Encoding", "base64")
+		htmlPart, _ := amw.CreatePart(htmlHeader)
+		b64HTML := base64.NewEncoder(base64.StdEncoding, htmlPart)
+		_, _ = b64HTML.Write(email.HTMLBody)
+		_ = b64HTML.Close()
+
+		if hasAttachments {
+			_ = amw.Close()
+		}
+	} else {
+		// Single body (either plain or HTML)
+		header := make(textproto.MIMEHeader)
+		contentType := "text/plain; charset=\"UTF-8\""
+		if isHTML {
+			contentType = "text/html; charset=\"UTF-8\""
+		}
+		header.Set("Content-Type", contentType)
+		header.Set("Content-Transfer-Encoding", "base64")
+
+		part, _ := mw.CreatePart(header)
+		b64 := base64.NewEncoder(base64.StdEncoding, part)
+		_, _ = b64.Write(mainBody)
+		_ = b64.Close()
+	}
 
 	// Attachments
-	for _, att := range email.Attachments {
-		attHeader := make(textproto.MIMEHeader)
-		attContentType := att.ContentType
-		if attContentType == "" {
-			attContentType = "application/octet-stream"
-		}
-		attHeader.Set("Content-Type", attContentType)
-		attHeader.Set("Content-Transfer-Encoding", "base64")
-		attHeader.Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", att.Filename))
+	if hasAttachments {
+		for _, att := range email.Attachments {
+			attHeader := make(textproto.MIMEHeader)
+			attContentType := att.ContentType
+			if attContentType == "" {
+				attContentType = "application/octet-stream"
+			}
+			attHeader.Set("Content-Type", attContentType)
+			attHeader.Set("Content-Transfer-Encoding", "base64")
 
-		part, _ := mw.CreatePart(attHeader)
-		b64Writer := base64.NewEncoder(base64.StdEncoding, part)
-		_, _ = b64Writer.Write(att.Data)
-		_ = b64Writer.Close()
+			disposition := fmt.Sprintf("attachment; filename=\"%s\"", att.Filename)
+			if att.ContentID != "" {
+				attHeader.Set("Content-ID", "<"+att.ContentID+">")
+				disposition = fmt.Sprintf("inline; filename=\"%s\"", att.Filename)
+			}
+			attHeader.Set("Content-Disposition", disposition)
+
+			part, _ := mw.CreatePart(attHeader)
+			b64Writer := base64.NewEncoder(base64.StdEncoding, part)
+			_, _ = b64Writer.Write(att.Data)
+			_ = b64Writer.Close()
+		}
 	}
 
-	_ = mw.Close()
+	if mw != nil {
+		_ = mw.Close()
+	}
 	write("\r\n")
 }

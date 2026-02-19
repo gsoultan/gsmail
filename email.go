@@ -8,6 +8,7 @@ import (
 type Attachment struct {
 	Filename    string
 	ContentType string
+	ContentID   string
 	Data        []byte
 }
 
@@ -15,8 +16,12 @@ type Attachment struct {
 type Email struct {
 	From              string
 	To                []string
+	Cc                []string
+	Bcc               []string
+	ReplyTo           string
 	Subject           string
 	Body              []byte
+	HTMLBody          []byte
 	Attachments       []Attachment
 	OutlookCompatible bool
 }

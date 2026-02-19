@@ -31,8 +31,29 @@ func Receive(ctx context.Context, f Receiver, limit int) ([]Email, error) {
 	return f.Receive(ctx, limit)
 }
 
+// Search searches for emails using the specified receiver.
+func Search(ctx context.Context, f Receiver, options SearchOptions, limit int) ([]Email, error) {
+	if f == nil {
+		return nil, fmt.Errorf("receiver is nil")
+	}
+	return f.Search(ctx, options, limit)
+}
+
+// Idle waits for new emails using the specified receiver.
+func Idle(ctx context.Context, f Receiver) (<-chan Email, <-chan error) {
+	if f == nil {
+		emailChan := make(chan Email)
+		errChan := make(chan error, 1)
+		close(emailChan)
+		errChan <- fmt.Errorf("receiver is nil")
+		close(errChan)
+		return emailChan, errChan
+	}
+	return f.Idle(ctx)
+}
+
 // Ping checks the connection of the given sender or receiver.
-func Ping(ctx context.Context, p interface{}) error {
+func Ping(ctx context.Context, p any) error {
 	if s, ok := p.(Sender); ok {
 		return s.Ping(ctx)
 	}

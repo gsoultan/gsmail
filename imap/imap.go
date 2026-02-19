@@ -10,64 +10,47 @@ import (
 	"time"
 
 	goimap "github.com/emersion/go-imap"
+	idle "github.com/emersion/go-imap-idle"
 	"github.com/emersion/go-imap/client"
+	sasl "github.com/emersion/go-sasl"
 	"github.com/gsoultan/gsmail"
 )
 
-// Receiver represents the IMAP server configuration.
+// Receiver represents the IMAP server configuration and implements the Receiver interface.
 type Receiver struct {
 	gsmail.BaseProvider
-	Host     string
-	Port     int
-	Username string
-	Password string
-	SSL      bool
+	Host               string
+	Port               int
+	Username           string
+	Password           string
+	SSL                bool
+	InsecureSkipVerify bool
+
+	// Modern auth
+	AuthMethod        gsmail.AuthMethod
+	TokenSource       gsmail.TokenSource
+	AllowInsecureAuth bool
 }
 
 // NewReceiver creates a new IMAP receiver.
 func NewReceiver(host string, port int, username, password string, ssl bool) *Receiver {
 	return &Receiver{
-		Host:     host,
-		Port:     port,
-		Username: username,
-		Password: password,
-		SSL:      ssl,
+		Host:               host,
+		Port:               port,
+		Username:           username,
+		Password:           password,
+		SSL:                ssl,
+		InsecureSkipVerify: false,
 	}
 }
 
 // Ping checks the connection to the IMAP server.
 func (f *Receiver) Ping(ctx context.Context) error {
 	return gsmail.Retry(ctx, f.GetRetryConfig(), func() error {
-		addr := net.JoinHostPort(f.Host, fmt.Sprintf("%d", f.Port))
-
-		var conn net.Conn
-		var err error
-		d := net.Dialer{Timeout: 30 * time.Second}
-		conn, err = d.DialContext(ctx, "tcp", addr)
+		c, _, err := f.connect(ctx)
 		if err != nil {
-			return fmt.Errorf("imap dial: %w", err)
+			return err
 		}
-
-		var c *client.Client
-		if f.SSL {
-			tlsConn := tls.Client(conn, &tls.Config{ServerName: f.Host, MinVersion: tls.VersionTLS12})
-			if err := tlsConn.HandshakeContext(ctx); err != nil {
-				_ = tlsConn.Close()
-				return fmt.Errorf("imap tls handshake: %w", err)
-			}
-			c, err = client.New(tlsConn)
-			if err != nil {
-				_ = tlsConn.Close()
-				return fmt.Errorf("imap client new: %w", err)
-			}
-		} else {
-			c, err = client.New(conn)
-			if err != nil {
-				_ = conn.Close()
-				return fmt.Errorf("imap client new: %w", err)
-			}
-		}
-
 		defer func() { _ = c.Logout() }()
 
 		if err := c.Noop(); err != nil {
@@ -78,18 +61,7 @@ func (f *Receiver) Ping(ctx context.Context) error {
 	})
 }
 
-// Receive retrieves emails using IMAP.
-func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, error) {
-	var emails []gsmail.Email
-	err := gsmail.Retry(ctx, f.GetRetryConfig(), func() error {
-		var err error
-		emails, err = f.receive(ctx, limit)
-		return err
-	})
-	return emails, err
-}
-
-func (f *Receiver) receive(ctx context.Context, limit int) ([]gsmail.Email, error) {
+func (f *Receiver) connect(ctx context.Context) (*client.Client, bool, error) {
 	addr := net.JoinHostPort(f.Host, fmt.Sprintf("%d", f.Port))
 
 	var conn net.Conn
@@ -97,53 +69,259 @@ func (f *Receiver) receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 	d := net.Dialer{Timeout: 30 * time.Second}
 	conn, err = d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("imap dial: %w", err)
+		return nil, false, fmt.Errorf("imap dial: %w", err)
 	}
 
 	var c *client.Client
+	var tlsOn bool
 	if f.SSL {
-		tlsConn := tls.Client(conn, &tls.Config{ServerName: f.Host, MinVersion: tls.VersionTLS12})
+		tlsConfig := &tls.Config{
+			ServerName:         f.Host,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: f.InsecureSkipVerify,
+		}
+		tlsConn := tls.Client(conn, tlsConfig)
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			_ = tlsConn.Close()
-			return nil, fmt.Errorf("imap tls handshake: %w", err)
+			return nil, false, fmt.Errorf("imap tls handshake: %w", err)
 		}
 		c, err = client.New(tlsConn)
 		if err != nil {
 			_ = tlsConn.Close()
-			return nil, fmt.Errorf("imap client new: %w", err)
+			return nil, false, fmt.Errorf("imap client new: %w", err)
 		}
+		tlsOn = true
 	} else {
 		c, err = client.New(conn)
 		if err != nil {
 			_ = conn.Close()
-			return nil, fmt.Errorf("imap client new: %w", err)
+			return nil, false, fmt.Errorf("imap client new: %w", err)
+		}
+
+		// Try STARTTLS if not using SSL
+		if ok, _ := c.SupportStartTLS(); ok {
+			tlsConfig := &tls.Config{
+				ServerName:         f.Host,
+				MinVersion:         tls.VersionTLS12,
+				InsecureSkipVerify: f.InsecureSkipVerify,
+			}
+			if err := c.StartTLS(tlsConfig); err != nil {
+				_ = c.Logout()
+				return nil, false, fmt.Errorf("imap starttls: %w", err)
+			}
+			tlsOn = true
 		}
 	}
+	return c, tlsOn, nil
+}
 
-	defer func() { _ = c.Logout() }()
-
-	if err := c.Login(f.Username, f.Password); err != nil {
-		return nil, fmt.Errorf("imap login: %w", err)
+func (f *Receiver) authenticate(ctx context.Context, c *client.Client, tlsOn bool) error {
+	if f.AuthMethod == gsmail.AuthXOAUTH2 || f.AuthMethod == gsmail.AuthOAUTHBEARER {
+		if !tlsOn && !f.AllowInsecureAuth {
+			return fmt.Errorf("imap oauth2 requires TLS; enable SSL/STARTTLS or AllowInsecureAuth for testing")
+		}
+		if f.TokenSource == nil {
+			return fmt.Errorf("imap oauth2 token source is nil")
+		}
+		tok, err := f.TokenSource(ctx)
+		if err != nil {
+			return fmt.Errorf("imap token source: %w", err)
+		}
+		var authClient sasl.Client
+		if f.AuthMethod == gsmail.AuthXOAUTH2 {
+			authClient = gsmail.NewXOAUTH2Client(f.Username, tok)
+		} else {
+			authClient = sasl.NewOAuthBearerClient(&sasl.OAuthBearerOptions{Username: f.Username, Token: tok})
+		}
+		if err := c.Authenticate(authClient); err != nil {
+			return fmt.Errorf("imap authenticate: %w", err)
+		}
+	} else {
+		if err := c.Login(f.Username, f.Password); err != nil {
+			return fmt.Errorf("imap login: %w", err)
+		}
 	}
+	return nil
+}
 
-	mbox, err := c.Select("INBOX", false)
-	if err != nil {
-		return nil, fmt.Errorf("imap select inbox: %w", err)
-	}
+// Receive retrieves emails using IMAP.
+func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, error) {
+	var emails []gsmail.Email
+	err := gsmail.Retry(ctx, f.GetRetryConfig(), func() error {
+		c, tlsOn, err := f.connect(ctx)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = c.Logout() }()
 
-	if mbox.Messages == 0 {
-		return nil, nil
-	}
+		if err := f.authenticate(ctx, c, tlsOn); err != nil {
+			return err
+		}
 
-	start := mbox.Messages
-	var end uint32 = 1
-	if mbox.Messages > uint32(limit) {
-		end = start - uint32(limit) + 1
-	}
+		mbox, err := c.Select("INBOX", false)
+		if err != nil {
+			return fmt.Errorf("imap select inbox: %w", err)
+		}
 
-	seqset := new(goimap.SeqSet)
-	seqset.AddRange(end, start)
+		if mbox.Messages == 0 {
+			emails = nil
+			return nil
+		}
 
+		start := mbox.Messages
+		var end uint32 = 1
+		if mbox.Messages > uint32(limit) {
+			end = start - uint32(limit) + 1
+		}
+
+		seqset := new(goimap.SeqSet)
+		seqset.AddRange(end, start)
+
+		emails, err = f.fetch(ctx, c, seqset, limit)
+		return err
+	})
+	return emails, err
+}
+
+// Search searches for emails using IMAP.
+func (f *Receiver) Search(ctx context.Context, options gsmail.SearchOptions, limit int) ([]gsmail.Email, error) {
+	var emails []gsmail.Email
+	err := gsmail.Retry(ctx, f.GetRetryConfig(), func() error {
+		c, tlsOn, err := f.connect(ctx)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = c.Logout() }()
+
+		if err := f.authenticate(ctx, c, tlsOn); err != nil {
+			return err
+		}
+
+		if _, err := c.Select("INBOX", false); err != nil {
+			return fmt.Errorf("imap select inbox: %w", err)
+		}
+
+		criteria := goimap.NewSearchCriteria()
+		if options.From != "" {
+			criteria.Header.Set("From", options.From)
+		}
+		if options.Subject != "" {
+			criteria.Header.Set("Subject", options.Subject)
+		}
+		if !options.Since.IsZero() {
+			criteria.Since = options.Since
+		}
+		if !options.Before.IsZero() {
+			criteria.Before = options.Before
+		}
+		if options.Unseen {
+			criteria.WithoutFlags = []string{goimap.SeenFlag}
+		}
+
+		uids, err := c.Search(criteria)
+		if err != nil {
+			return fmt.Errorf("imap search: %w", err)
+		}
+
+		if len(uids) == 0 {
+			emails = nil
+			return nil
+		}
+
+		// Take the last N (newest)
+		if len(uids) > limit {
+			uids = uids[len(uids)-limit:]
+		}
+
+		seqset := new(goimap.SeqSet)
+		seqset.AddNum(uids...)
+
+		emails, err = f.fetch(ctx, c, seqset, limit)
+		return err
+	})
+	return emails, err
+}
+
+// Idle waits for new emails and sends them to the returned channel.
+func (f *Receiver) Idle(ctx context.Context) (<-chan gsmail.Email, <-chan error) {
+	emailChan := make(chan gsmail.Email, 10)
+	errChan := make(chan error, 1)
+
+	go func() {
+		defer close(emailChan)
+		defer close(errChan)
+
+		c, tlsOn, err := f.connect(ctx)
+		if err != nil {
+			errChan <- err
+			return
+		}
+		defer func() { _ = c.Logout() }()
+
+		if err := f.authenticate(ctx, c, tlsOn); err != nil {
+			errChan <- err
+			return
+		}
+
+		if _, err := c.Select("INBOX", false); err != nil {
+			errChan <- err
+			return
+		}
+
+		idleClient := idle.NewClient(c)
+
+		// Create a channel for mailbox updates
+		updates := make(chan client.Update, 10)
+		c.Updates = updates
+
+		stop := make(chan struct{})
+		done := make(chan error, 1)
+
+		go func() {
+			// IDLE with fallback for servers that don't support it
+			done <- idleClient.IdleWithFallback(stop, 29*time.Minute)
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				close(stop)
+				return
+			case err := <-done:
+				if err != nil {
+					errChan <- fmt.Errorf("idle error: %w", err)
+				}
+				return
+			case update := <-updates:
+				if mboxUpdate, ok := update.(*client.MailboxUpdate); ok {
+					// When mailbox is updated, fetch unseen messages
+					criteria := goimap.NewSearchCriteria()
+					criteria.WithoutFlags = []string{goimap.SeenFlag}
+					uids, err := c.Search(criteria)
+					if err == nil && len(uids) > 0 {
+						seqset := new(goimap.SeqSet)
+						seqset.AddNum(uids...)
+						emails, err := f.fetch(ctx, c, seqset, len(uids))
+						if err == nil {
+							for _, e := range emails {
+								select {
+								case emailChan <- e:
+								case <-ctx.Done():
+									return
+								}
+							}
+						}
+					}
+					_ = mboxUpdate
+				}
+			}
+		}
+	}()
+
+	return emailChan, errChan
+}
+
+func (f *Receiver) fetch(ctx context.Context, c *client.Client, seqset *goimap.SeqSet, limit int) ([]gsmail.Email, error) {
 	type indexedMessage struct {
 		idx int
 		msg *goimap.Message
@@ -154,6 +332,7 @@ func (f *Receiver) receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 	go func() {
 		done <- c.Fetch(seqset, []goimap.FetchItem{goimap.FetchRFC822}, fetchMessages)
 	}()
+
 	count := 0
 	go func() {
 		defer close(messages)
@@ -171,7 +350,6 @@ func (f *Receiver) receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 	results := make(chan result, limit)
 	var wg sync.WaitGroup
 
-	// Fixed worker pool for production readiness
 	numWorkers := 10
 	if limit < numWorkers {
 		numWorkers = limit
@@ -182,7 +360,6 @@ func (f *Receiver) receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 		go func() {
 			defer wg.Done()
 			for res := range messages {
-				// Check context cancellation
 				select {
 				case <-ctx.Done():
 					return
@@ -244,11 +421,6 @@ func (f *Receiver) receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 	if fetchErr != nil {
 		return emails, fetchErr
 	}
-
-	// The map approach maintains order (sort of, by rebuilding it)
-	// Newest first was handled by reversing before.
-	// The original code reversed at the end.
-	// Let's re-verify the reverse logic.
 
 	// Reverse to have newest first
 	for i, j := 0, len(emails)-1; i < j; i, j = i+1, j-1 {

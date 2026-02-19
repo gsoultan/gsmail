@@ -4,7 +4,15 @@
 
 ## Features
 
-- **Pluggable Senders**: Send emails via standard SMTP (with SSL/TLS) or AWS SES.
+- **Pluggable Senders**: Send emails via standard SMTP (with SSL/TLS), AWS SES, or API-based providers (SendGrid, Mailgun, Postmark).
+- **Modern Authentication**: Support for XOAUTH2 and OAUTHBEARER for SMTP, IMAP, and POP3.
+- **Deliverability**: Built-in DKIM signing support.
+- **Middleware & Interceptors**: Custom logic for logging, recovery, and observability.
+- **OpenTelemetry Support**: Native tracing for sending and receiving.
+- **Advanced IMAP**: Support for searching emails and real-time IDLE notifications.
+- **Background Sending**: In-memory worker pool for non-blocking email delivery.
+- **Domain Health Utilities**: Diagnostic tools for SPF, DKIM, DMARC, and MX records.
+- **Bounce & Complaint Handling**: Parse DSN/ARF emails and provider webhooks (SES, SendGrid, etc.).
 - **SMTP Connection Pooling**: Reuse connections for high-performance SMTP delivery.
 - **Pluggable Receivers**: Receive emails via POP3 and IMAP.
 - **Dynamic Templates**: Built-in support for `text/template` and `html/template`.
@@ -262,6 +270,70 @@ func main() {
     // Use sender as usual
     email := gsmail.Email{ /* ... */ }
     err := gsmail.Send(context.Background(), sender, email)
+}
+```
+
+## Production-Ready Features
+
+### Modern Authentication (OAuth2)
+
+Connect to Gmail, Outlook, and other modern providers using XOAUTH2 or OAUTHBEARER.
+
+```go
+sender := smtp.NewSender("smtp.gmail.com", 587, "user@gmail.com", "", false)
+tokenSource := func(ctx context.Context) (string, error) { return "your-token", nil }
+sender.UseOAuth(gsmail.AuthXOAUTH2, tokenSource)
+```
+
+### Middleware & Interceptors
+
+Customize the sending and receiving process with interceptors.
+
+```go
+wrappedSender := gsmail.WrapSender(sender,
+    gsmail.LoggerInterceptor(log.Printf),
+    gsmail.RecoveryInterceptor(),
+    otelgs.SendInterceptor(),
+)
+```
+
+### Background Worker
+
+Send emails asynchronously without blocking your main application flow.
+
+```go
+bgSender := gsmail.NewBackgroundSender(sender, 100)
+bgSender.Start(5)
+bgSender.Send(email)
+```
+
+### Advanced IMAP (Search & IDLE)
+
+```go
+// Search for emails
+opts := gsmail.SearchOptions{From: "boss@example.com", Unseen: true}
+emails, _ := receiver.Search(ctx, opts, 10)
+
+// Listen for new emails in real-time
+emailsChan, errChan := receiver.Idle(ctx)
+```
+
+### Deliverability: DKIM Signing
+
+```go
+sender.DKIMConfig = &gsmail.DKIMOptions{
+    Domain:     "example.com",
+    Selector:   "default",
+    PrivateKey: "-----BEGIN RSA PRIVATE KEY-----...",
+}
+```
+
+### Domain Health Diagnostic
+
+```go
+health, _ := gsmail.CheckDomainHealth(ctx, "example.com", []string{"default"})
+if !health.SPF.Valid {
+    fmt.Printf("SPF Issue: %s\n", health.SPF.Details)
 }
 ```
 

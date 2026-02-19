@@ -8,8 +8,18 @@ import (
 
 	"github.com/gsoultan/gsmail"
 	"github.com/gsoultan/gsmail/imap"
+	"github.com/gsoultan/gsmail/mailgun"
+	"github.com/gsoultan/gsmail/otelgs"
+	"github.com/gsoultan/gsmail/postmark"
+	"github.com/gsoultan/gsmail/sendgrid"
 	"github.com/gsoultan/gsmail/smtp"
 )
+
+func useProviders() {
+	_ = sendgrid.NewSender("SG.api_key")
+	_ = mailgun.NewSender("example.com", "mg_api_key")
+	_ = postmark.NewSender("pm_server_token")
+}
 
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -23,7 +33,7 @@ func main() {
 	}
 
 	// 2. Dynamic Template with Automatic HTML Detection
-	data := map[string]interface{}{
+	data := map[string]any{
 		"Name": "Awesome Developer",
 		"Date": time.Now().Format("2006-01-02"),
 	}
@@ -53,22 +63,85 @@ func main() {
 	// Just to use ctx in the example so it compiles without warnings
 	_ = ctx
 
-	// 4. Sending via SMTP (Example Config)
+	// 4. Domain Health Check (New Feature)
+	domain := "example.com"
+	fmt.Printf("\nChecking Domain Health for %s...\n", domain)
+	// Example call (commented out as it requires network)
+	// health, _ := gsmail.CheckDomainHealth(ctx, domain, []string{"google", "mandrill"})
+	// fmt.Printf("SPF Valid: %v, DMARC Valid: %v\n", health.SPF.Valid, health.DMARC.Valid)
+
+	// 5. DKIM Signing (New Feature)
+	// You can sign any raw email bytes or configure a sender to do it automatically.
+	dkimOpts := gsmail.DKIMOptions{
+		Domain:   "example.com",
+		Selector: "default",
+		// PrivateKey can be a PEM string
+		PrivateKey: `-----BEGIN RSA PRIVATE KEY-----
+... your private key ...
+-----END RSA PRIVATE KEY-----`,
+	}
+	_ = dkimOpts
+
+	// 6. Sending via SMTP (Example Config)
 	// NewSender(host, port, user, pass, isSSL)
-	smtpSender := smtp.NewSender("smtp.example.com", 587, "myuser", "mypass", false)
+	smtpSender := smtp.NewSender("smtp.example.com", 587, "user@example.com", "mypass", false)
 
-	// In a real scenario, you would call:
-	// err := gsmail.Send(ctx, smtpSender, email)
-	fmt.Printf("Ready to send email from %s to %v\n", email.From, email.To)
-	_ = smtpSender
+	// 7. Middleware & Observability (New Feature)
+	// Wrap the sender with logging and OpenTelemetry tracing
+	wrappedSender := gsmail.WrapSender(smtpSender,
+		gsmail.LoggerInterceptor(log.Printf),
+		gsmail.RecoveryInterceptor(),
+		otelgs.SendInterceptor(),
+	)
 
-	// 5. Receiving via IMAP
-	// NewReceiver(host, port, user, pass, isSSL)
-	imapReceiver := imap.NewReceiver("imap.example.com", 993, "myuser", "mypass", true)
+	// 8. Background Sending (New Feature)
+	// For high-throughput apps, send emails in the background
+	bgSender := gsmail.NewBackgroundSender(wrappedSender, 100)
+	bgSender.Start(5) // Start 5 workers
+	defer bgSender.Stop()
 
-	fmt.Println("Ready to receive emails via IMAP...")
-	// emails, err := imapReceiver.Receive(ctx, 5) // Receive last 5 emails
+	// Add email to background queue
+	if bgSender.Send(email) {
+		fmt.Println("Email queued for background sending")
+	}
+
+	// 9. Receiving via IMAP with Search & IDLE (New Feature)
+	imapReceiver := imap.NewReceiver("imap.example.com", 993, "user@example.com", "mypass", true)
 	_ = imapReceiver
+
+	// Search for unseen emails from a specific sender
+	opts := gsmail.SearchOptions{
+		From:   "boss@example.com",
+		Unseen: true,
+	}
+	_ = opts
+	fmt.Println("Searching for urgent emails...")
+	// emails, _ := imapReceiver.Search(ctx, opts, 10)
+
+	// Use IDLE for real-time notifications
+	// emailsChan, errChan := imapReceiver.Idle(ctx)
+	// go func() {
+	//     for e := range emailsChan {
+	//         fmt.Printf("New email received: %s\n", e.Subject)
+	//     }
+	// }()
+
+	// 10. Bounce & Complaint Handling
+	// Example: Parsing a raw DSN email
+	rawDSN := []byte("...") // raw bytes from a bounce email
+	if dsnEmail, err := gsmail.ParseRawEmail(rawDSN); err == nil {
+		if bounce, err := gsmail.ParseBounce(dsnEmail); err == nil {
+			fmt.Printf("Detected %s bounce for %s: %s\n", bounce.Type, bounce.EmailAddress, bounce.Reason)
+		}
+	}
+
+	// Example: Handling AWS SES Webhook
+	sesPayload := []byte(`{"notificationType": "Bounce", ...}`)
+	if res, err := gsmail.ParseSESWebhook(sesPayload); err == nil {
+		if b, ok := res.(*gsmail.Bounce); ok {
+			fmt.Printf("SES Bounce: %s\n", b.EmailAddress)
+		}
+	}
 
 	fmt.Println("Example finished successfully.")
 }
