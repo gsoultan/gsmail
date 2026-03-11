@@ -188,6 +188,14 @@ func (p *Sender) Close() error {
 	return nil
 }
 
+// PoolStats returns the current statistics of the connection pool, if enabled.
+func (p *Sender) PoolStats() (Stats, error) {
+	if p.Pool == nil {
+		return Stats{}, fmt.Errorf("pool not enabled")
+	}
+	return p.Pool.Stats(), nil
+}
+
 // Ping checks the connection to the SMTP server.
 func (p *Sender) Ping(ctx context.Context) error {
 	return gsmail.Retry(ctx, p.GetRetryConfig(), func() error {

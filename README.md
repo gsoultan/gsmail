@@ -13,7 +13,7 @@
 - **Background Sending**: In-memory worker pool for non-blocking email delivery.
 - **Domain Health Utilities**: Diagnostic tools for SPF, DKIM, DMARC, and MX records.
 - **Bounce & Complaint Handling**: Parse DSN/ARF emails and provider webhooks (SES, SendGrid, etc.).
-- **SMTP Connection Pooling**: Reuse connections for high-performance SMTP delivery.
+- **Advanced SMTP Connection Pooling**: Reuse connections with a configurable `Wait` mechanism, `MaxLifetime`, and observability (`PoolStats`).
 - **Pluggable Receivers**: Receive emails via POP3 and IMAP.
 - **Dynamic Templates**: Built-in support for `text/template` and `html/template`.
 - **Flexible Template Loading**: Load templates from strings, HTTP URLs, or AWS S3 compatible storage.
@@ -244,13 +244,14 @@ if err != nil {
 err = receiver.Ping(context.Background())
 ```
 
-### SMTP Connection Pooling
+### SMTP Connection Pooling (Advanced)
 
-For high-volume email sending, you can enable connection pooling to reuse SMTP connections and reduce overhead.
+For high-volume email sending, you can enable connection pooling to reuse SMTP connections and reduce overhead. `gsmail` provides a robust pooling implementation that supports 1000+ concurrent sends with zero connection leaks and automatic reuse.
 
 ```go
 import (
     "context"
+    "fmt"
     "time"
     "github.com/gsoultan/gsmail"
     "github.com/gsoultan/gsmail/smtp"
@@ -259,19 +260,41 @@ import (
 func main() {
     sender := smtp.NewSender("smtp.example.com", 587, "user", "pass", false)
     
-    // Enable connection pooling
+    // Enable connection pooling for high-volume email delivery
     sender.EnablePool(smtp.PoolConfig{
-        MaxIdle:     10,                // Keep up to 10 idle connections
-        MaxOpen:     20,                // Limit total open connections to 20 (0 for unlimited)
+        MaxIdle:     20,                // Number of idle connections to keep
+        MaxOpen:     100,               // Total concurrent connections limit (0 for unlimited)
         IdleTimeout: 5 * time.Minute,   // Close connections idle for more than 5 minutes
+        MaxLifetime: 1 * time.Hour,     // Maximum age of a connection before refresh
+        Wait:        true,              // Block when pool is full (recommended for 1000+ concurrent)
     })
-    defer sender.Close() // Closes all connections in the pool when done
+    defer sender.Close() // Gracefully closes all connections in the pool when done
+
+    // Monitoring pool stats (optional)
+    stats, _ := sender.PoolStats()
+    fmt.Printf("Open: %d, Idle: %d, InUse: %d, WaitCount: %d, WaitDuration: %v\n", 
+        stats.OpenConnections, stats.IdleConnections, stats.InUse, stats.WaitCount, stats.WaitDuration)
 
     // Use sender as usual
     email := gsmail.Email{ /* ... */ }
     err := gsmail.Send(context.Background(), sender, email)
 }
 ```
+
+#### High-Volume Recommendations (1000+ Concurrent)
+
+When sending over 1000 emails concurrently, the following configuration and server choices are recommended:
+
+1. **Enable Waiting**: Set `Wait: true` in `PoolConfig`. This allows your goroutines to wait for an available connection instead of failing with `ErrPoolFull`.
+2. **Set MaxOpen**: Align `MaxOpen` with your SMTP server's concurrent connection limit (often 50-100 for commercial providers).
+3. **Use MaxLifetime**: Helps avoid issues with long-lived connections that might be silently throttled or closed by the server.
+
+**Recommended SMTP Providers:**
+- **Amazon SES**: Most cost-effective and highly scalable for massive volumes.
+- **Twilio SendGrid**: Industry standard with robust SMTP and API delivery.
+- **Mailgun**: Excellent deliverability and developer-friendly features.
+- **Postmark**: Best-in-class for transactional email speed and reliability.
+- **SMTP2GO**: Highly reliable SMTP-focused service, great for high concurrency.
 
 ## Production-Ready Features
 
@@ -339,7 +362,10 @@ if !health.SPF.Valid {
 
 ## Performance Guidelines
 
-This library is designed for performance. To get the most out of it, use the recommended build flags:
+This library is designed for performance. To get the most out of it:
+
+- **Use Connection Pooling**: Always enable pooling for high-volume delivery. `gsmail` uses optimized mutex locking and direct connection handoff to minimize latency.
+- **Build with Optimization Flags**: Use the recommended flags to reduce binary size and memory pressure.
 
 ```bash
 go build -ldflags="-s -w" -gcflags="-m -l" .
