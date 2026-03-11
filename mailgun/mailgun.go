@@ -37,20 +37,20 @@ func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
 		body := &bytes.Buffer{}
 		writer := multipart.NewWriter(body)
 
-		_ = writer.WriteField("from", email.From)
+		_ = writer.WriteField("from", gsmail.FormatAddress(email.From))
 		for _, to := range email.To {
-			_ = writer.WriteField("to", to)
+			_ = writer.WriteField("to", gsmail.FormatAddress(to))
 		}
 		for _, cc := range email.Cc {
-			_ = writer.WriteField("cc", cc)
+			_ = writer.WriteField("cc", gsmail.FormatAddress(cc))
 		}
 		for _, bcc := range email.Bcc {
-			_ = writer.WriteField("bcc", bcc)
+			_ = writer.WriteField("bcc", gsmail.FormatAddress(bcc))
 		}
 		_ = writer.WriteField("subject", email.Subject)
 
 		if email.ReplyTo != "" {
-			_ = writer.WriteField("h:Reply-To", email.ReplyTo)
+			_ = writer.WriteField("h:Reply-To", gsmail.FormatAddress(email.ReplyTo))
 		}
 
 		if len(email.Body) > 0 && !gsmail.IsHTML(email.Body) {

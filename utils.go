@@ -479,16 +479,57 @@ func generateMessageID(from string) string {
 	return fmt.Sprintf("<%x@%s>", b, domain)
 }
 
-func formatAddresses(addresses []string) string {
-	var formatted []string
+// FormatAddresses formats a list of addresses into a single string for headers.
+func FormatAddresses(addresses []string) string {
+	return strings.Join(FormatAddressList(addresses), ", ")
+}
+
+// FormatAddressList formats a list of addresses into a slice of strings.
+func FormatAddressList(addresses []string) []string {
+	formatted := make([]string, 0, len(addresses))
 	for _, addr := range addresses {
-		if a, err := mail.ParseAddress(addr); err == nil {
-			formatted = append(formatted, a.String())
-		} else {
-			formatted = append(formatted, addr)
+		formatted = append(formatted, FormatAddress(addr))
+	}
+	return formatted
+}
+
+// FormatAddress ensures an email address is properly formatted (e.g., quotes names with special characters).
+func FormatAddress(s string) string {
+	if a, err := ParseEmailAddress(s); err == nil && a != nil {
+		if a.Name == "" {
+			return a.Address
+		}
+		return a.String()
+	}
+	return s
+}
+
+// ParseEmailAddress parses an email address that can be in the form of "Name <email@example.com>" or just "email@example.com".
+func ParseEmailAddress(s string) (*mail.Address, error) {
+	if s == "" {
+		return nil, nil
+	}
+	a, err := mail.ParseAddress(s)
+	if err == nil {
+		return a, nil
+	}
+
+	// Try manual parsing if standard parser fails (e.g., name with comma not quoted)
+	s = strings.TrimSpace(s)
+	if strings.HasSuffix(s, ">") {
+		idx := strings.LastIndex(s, "<")
+		if idx >= 0 {
+			name := strings.TrimSpace(s[:idx])
+			email := strings.TrimSpace(s[idx+1 : len(s)-1])
+			// If name is quoted, unquote it so a.String() can quote it properly later
+			if name != "" && len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
+				name = name[1 : len(name)-1]
+			}
+			return &mail.Address{Name: name, Address: email}, nil
 		}
 	}
-	return strings.Join(formatted, ", ")
+
+	return nil, err
 }
 
 func encodeHeader(s string) string {
@@ -518,22 +559,18 @@ func BuildMessage(bufPtr *[]byte, email Email) {
 	}
 
 	// Basic headers
-	fromAddr := email.From
-	if a, err := mail.ParseAddress(fromAddr); err == nil {
-		fromAddr = a.String()
-	}
-	writeHeader("From", fromAddr)
+	writeHeader("From", FormatAddress(email.From))
 
 	if !HasHeader(*bufPtr, "To") && len(email.To) > 0 {
-		writeHeader("To", formatAddresses(email.To))
+		writeHeader("To", FormatAddresses(email.To))
 	}
 
 	if len(email.Cc) > 0 {
-		writeHeader("Cc", formatAddresses(email.Cc))
+		writeHeader("Cc", FormatAddresses(email.Cc))
 	}
 
 	if email.ReplyTo != "" {
-		writeHeader("Reply-To", formatAddresses([]string{email.ReplyTo}))
+		writeHeader("Reply-To", FormatAddresses([]string{email.ReplyTo}))
 	}
 
 	writeHeader("Subject", encodeHeader(email.Subject))

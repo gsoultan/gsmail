@@ -215,12 +215,21 @@ func (p *Sender) Ping(ctx context.Context) error {
 }
 
 func (p *Sender) sendOnClient(client *smtp.Client, from string, to []string, msg []byte) error {
+	f, _ := gsmail.ParseEmailAddress(from)
+	if f != nil {
+		from = f.Address
+	}
+
 	if err := client.Mail(from); err != nil {
 		return fmt.Errorf("smtp mail from: %w", err)
 	}
 
 	for _, t := range to {
-		if err := client.Rcpt(t); err != nil {
+		rcpt := t
+		if a, _ := gsmail.ParseEmailAddress(t); a != nil {
+			rcpt = a.Address
+		}
+		if err := client.Rcpt(rcpt); err != nil {
 			return fmt.Errorf("smtp rcpt to %s: %w", t, err)
 		}
 	}

@@ -25,7 +25,7 @@
 - **Modern AWS SDK**: Uses AWS SDK for Go v2.
 - **Context Awareness**: Full support for `context.Context` for timeouts and cancellation.
 - **Connection Health Check**: Easily verify connectivity to providers using the `Ping` method.
-- **Examples Included**: See the `examples/` directory for complete usage scenarios.
+- **Examples Included**: See the `examples/` directory for complete usage scenarios, including a dedicated [SMTP example](examples/smtp/main.go) for high-concurrency sending.
 
 ## Installation
 

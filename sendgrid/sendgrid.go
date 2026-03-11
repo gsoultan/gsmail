@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/mail"
 	"time"
 
 	"github.com/gsoultan/gsmail"
@@ -166,7 +165,7 @@ func (p *Sender) buildRequest(email gsmail.Email) (sendgridRequest, error) {
 }
 
 func parseAddress(s string) address {
-	if a, err := mail.ParseAddress(s); err == nil {
+	if a, err := gsmail.ParseEmailAddress(s); err == nil && a != nil {
 		return address{Email: a.Address, Name: a.Name}
 	}
 	return address{Email: s}

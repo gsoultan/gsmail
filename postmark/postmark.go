@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gsoultan/gsmail"
@@ -53,12 +52,12 @@ type attachment struct {
 func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
 	return gsmail.Retry(ctx, p.GetRetryConfig(), func() error {
 		reqBody := postmarkRequest{
-			From:    email.From,
-			To:      strings.Join(email.To, ","),
-			Cc:      strings.Join(email.Cc, ","),
-			Bcc:     strings.Join(email.Bcc, ","),
+			From:    gsmail.FormatAddress(email.From),
+			To:      gsmail.FormatAddresses(email.To),
+			Cc:      gsmail.FormatAddresses(email.Cc),
+			Bcc:     gsmail.FormatAddresses(email.Bcc),
 			Subject: email.Subject,
-			ReplyTo: email.ReplyTo,
+			ReplyTo: gsmail.FormatAddress(email.ReplyTo),
 		}
 
 		if len(email.Body) > 0 {

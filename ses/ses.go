@@ -95,17 +95,17 @@ func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
 		}
 
 		input := &sesv2.SendEmailInput{
-			FromEmailAddress: aws.String(email.From),
+			FromEmailAddress: aws.String(gsmail.FormatAddress(email.From)),
 			Destination: &types.Destination{
-				ToAddresses:  email.To,
-				CcAddresses:  email.Cc,
-				BccAddresses: email.Bcc,
+				ToAddresses:  gsmail.FormatAddressList(email.To),
+				CcAddresses:  gsmail.FormatAddressList(email.Cc),
+				BccAddresses: gsmail.FormatAddressList(email.Bcc),
 			},
 			Content: &types.EmailContent{},
 		}
 
 		if email.ReplyTo != "" {
-			input.ReplyToAddresses = []string{email.ReplyTo}
+			input.ReplyToAddresses = []string{gsmail.FormatAddress(email.ReplyTo)}
 		}
 
 		hasAttachments := len(email.Attachments) > 0
