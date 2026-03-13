@@ -66,6 +66,9 @@ var (
         span.MsoHyperlink { mso-style-priority: 99; color: inherit; }
         span.MsoHyperlinkFollowed { mso-style-priority: 99; color: inherit; }
 
+        /* Emoji/Unicode fallback for Outlook 2016+ - Segoe UI Emoji renders emoji on Windows */
+        .mso-emoji { font-family: 'Segoe UI Emoji', 'Segoe UI Symbol', Arial, sans-serif !important; }
+
         /* Font scaling fix */
         @media only screen and (min-width: 600px) {
             .templateContainer { width: 600px !important; }
@@ -363,6 +366,15 @@ func MSOPreheaderTruncated(text string, maxLen int) string {
 		text = string(runes[:maxLen-1]) + "…"
 	}
 	return MSOPreheader(text)
+}
+
+// MSOEmoji wraps text (e.g. emoji like ⏰) in a span with font-family that includes Segoe UI Emoji.
+// Use this for emoji/Unicode symbols so Outlook 2016+ renders them correctly on Windows.
+func MSOEmoji(text string) string {
+	if text == "" {
+		return ""
+	}
+	return fmt.Sprintf(`<span class="mso-emoji" style="font-family:'Segoe UI Emoji','Segoe UI Symbol',Arial,sans-serif;">%s</span>`, text)
 }
 
 // MSOSafeFontStack returns an Outlook-safe font stack (Arial, Helvetica, sans-serif).

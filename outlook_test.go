@@ -367,6 +367,19 @@ func TestOutlookHelpers(t *testing.T) {
 		}
 	})
 
+	t.Run("MSOEmoji", func(t *testing.T) {
+		emoji := MSOEmoji("⏰")
+		if !bytes.Contains([]byte(emoji), []byte("Segoe UI Emoji")) {
+			t.Error("MSOEmoji should include Segoe UI Emoji font")
+		}
+		if !bytes.Contains([]byte(emoji), []byte("⏰")) {
+			t.Error("MSOEmoji should contain the emoji")
+		}
+		if MSOEmoji("") != "" {
+			t.Error("Empty MSOEmoji should return empty string")
+		}
+	})
+
 	t.Run("MSOSafeFontStack", func(t *testing.T) {
 		stack := MSOSafeFontStack()
 		if stack != "Arial, Helvetica, sans-serif" {
