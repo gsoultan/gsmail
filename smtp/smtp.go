@@ -29,6 +29,15 @@ type Sender struct {
 
 	// Deliverability
 	DKIMConfig *gsmail.DKIMOptions
+
+	// TLS configuration (optional)
+	// CipherSuites restricts TLS 1.2 (and 1.1) cipher suites; nil uses default secure set.
+	// TLS 1.3 cipher suites are not configurable in Go.
+	CipherSuites []uint16
+	// MinVersion is the minimum TLS version (e.g. tls.VersionTLS11, tls.VersionTLS12); 0 uses default (TLS 1.1).
+	MinVersion uint16
+	// MaxVersion is the maximum TLS version (e.g. tls.VersionTLS12); 0 means no limit (allows TLS 1.3).
+	MaxVersion uint16
 }
 
 // NewSender creates a new SMTP provider.
@@ -47,6 +56,39 @@ func NewSender(host string, port int, username, password string, ssl bool) *Send
 func (p *Sender) UseOAuth(method gsmail.AuthMethod, ts gsmail.TokenSource) {
 	p.AuthMethod = method
 	p.TokenSource = ts
+}
+
+// defaultCipherSuites is the default secure set for TLS 1.1/1.2 (no RC4/3DES).
+var defaultCipherSuites = []uint16{
+	tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+	tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+	tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+	tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+}
+
+// tlsConfig returns a TLS configuration. CipherSuites applies only to TLS 1.1/1.2;
+// TLS 1.3 cipher suites are not configurable in Go.
+func (p *Sender) tlsConfig(serverName string) *tls.Config {
+	cipherSuites := p.CipherSuites
+	if len(cipherSuites) == 0 {
+		cipherSuites = defaultCipherSuites
+	}
+	minVer := p.MinVersion
+	if minVer == 0 {
+		minVer = tls.VersionTLS11
+	}
+	cfg := &tls.Config{
+		ServerName:         serverName,
+		MinVersion:         minVer,
+		MaxVersion:         p.MaxVersion,
+		CipherSuites:       cipherSuites,
+		InsecureSkipVerify: p.InsecureSkipVerify,
+	}
+	return cfg
 }
 
 // Send sends an email using the SMTP configuration.
@@ -127,12 +169,7 @@ func (p *Sender) EnablePool(config PoolConfig) {
 		tlsOn := p.SSL
 		if !p.SSL {
 			if ok, _ := client.Extension("STARTTLS"); ok {
-				config := &tls.Config{
-					ServerName:         host,
-					MinVersion:         tls.VersionTLS12,
-					InsecureSkipVerify: p.InsecureSkipVerify,
-				}
-				if err = client.StartTLS(config); err != nil {
+				if err = client.StartTLS(p.tlsConfig(host)); err != nil {
 					_ = client.Close()
 					return nil, fmt.Errorf("starttls: %w", err)
 				}
@@ -277,12 +314,7 @@ func (p *Sender) sendPlain(ctx context.Context, addr string, auth smtp.Auth, fro
 
 	tlsOn := false
 	if ok, _ := client.Extension("STARTTLS"); ok {
-		config := &tls.Config{
-			ServerName:         host,
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: p.InsecureSkipVerify,
-		}
-		if err = client.StartTLS(config); err != nil {
+		if err = client.StartTLS(p.tlsConfig(host)); err != nil {
 			return fmt.Errorf("starttls: %w", err)
 		}
 		tlsOn = true
@@ -313,11 +345,7 @@ func (p *Sender) dial(ctx context.Context, addr string, useSSL bool) (string, *s
 	}
 
 	if useSSL {
-		tlsConn := tls.Client(conn, &tls.Config{
-			ServerName:         host,
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: p.InsecureSkipVerify,
-		})
+		tlsConn := tls.Client(conn, p.tlsConfig(host))
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			_ = tlsConn.Close()
 			return "", nil, fmt.Errorf("tls handshake: %w", err)

@@ -156,6 +156,51 @@ In your template you can now use `{{Add $index}}` (or any other custom function)
 {{end}}
 ```
 
+### TLS Configuration (Cipher Suites and Versions)
+
+SMTP and IMAP support configurable TLS cipher suites and version limits. **TLS 1.2 cipher suites** can be set explicitly; **TLS 1.3 cipher suites are not configurable** in Go and use the secure defaults.
+
+```go
+import (
+    "crypto/tls"
+    "github.com/gsoultan/gsmail"
+    "github.com/gsoultan/gsmail/smtp"
+    "github.com/gsoultan/gsmail/imap"
+)
+
+// SMTP: restrict to TLS 1.2 with specific cipher suites
+sender := smtp.NewSender("smtp.example.com", 587, "user", "pass", false)
+sender.CipherSuites = []uint16{
+    tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+    tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+    tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+    tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+}
+sender.MinVersion = tls.VersionTLS12
+// sender.MaxVersion = tls.VersionTLS12  // optional: disable TLS 1.3
+
+// IMAP: same options
+receiver := imap.NewReceiver("imap.example.com", 993, "user", "pass", true)
+receiver.CipherSuites = []uint16{
+    tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+    tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+}
+receiver.MinVersion = tls.VersionTLS12
+
+// Example: allow TLS 1.2 and 1.3, but customize only TLS 1.2 cipher suites
+sender2 := smtp.NewSender("smtp.example.com", 587, "user", "pass", false)
+sender2.MinVersion = tls.VersionTLS12           // TLS 1.2 minimum
+sender2.MaxVersion = 0                          // or tls.VersionTLS13; TLS 1.3 allowed
+sender2.CipherSuites = []uint16{                // applies to TLS 1.2 only
+    tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+    tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+}
+```
+
+- `CipherSuites`: applies to TLS 1.1/1.2 only; nil uses the default secure set.
+- `MinVersion`: e.g. `tls.VersionTLS11`, `tls.VersionTLS12`; 0 defaults to TLS 1.1.
+- `MaxVersion`: e.g. `tls.VersionTLS12` to disable TLS 1.3; 0 means no limit.
+
 ### Receiving Emails (IMAP)
 
 ```go

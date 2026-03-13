@@ -30,6 +30,15 @@ type Receiver struct {
 	AuthMethod        gsmail.AuthMethod
 	TokenSource       gsmail.TokenSource
 	AllowInsecureAuth bool
+
+	// TLS configuration (optional)
+	// CipherSuites restricts TLS 1.2 (and 1.1) cipher suites; nil uses default secure set.
+	// TLS 1.3 cipher suites are not configurable in Go.
+	CipherSuites []uint16
+	// MinVersion is the minimum TLS version (e.g. tls.VersionTLS11, tls.VersionTLS12); 0 uses default (TLS 1.1).
+	MinVersion uint16
+	// MaxVersion is the maximum TLS version (e.g. tls.VersionTLS12); 0 means no limit (allows TLS 1.3).
+	MaxVersion uint16
 }
 
 // NewReceiver creates a new IMAP receiver.
@@ -41,6 +50,38 @@ func NewReceiver(host string, port int, username, password string, ssl bool) *Re
 		Password:           password,
 		SSL:                ssl,
 		InsecureSkipVerify: false,
+	}
+}
+
+// defaultCipherSuites is the default secure set for TLS 1.1/1.2 (no RC4/3DES).
+var defaultCipherSuites = []uint16{
+	tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+	tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+	tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+	tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+}
+
+// tlsConfig returns a TLS configuration. CipherSuites applies only to TLS 1.1/1.2;
+// TLS 1.3 cipher suites are not configurable in Go.
+func (f *Receiver) tlsConfig() *tls.Config {
+	cipherSuites := f.CipherSuites
+	if len(cipherSuites) == 0 {
+		cipherSuites = defaultCipherSuites
+	}
+	minVer := f.MinVersion
+	if minVer == 0 {
+		minVer = tls.VersionTLS11
+	}
+	return &tls.Config{
+		ServerName:         f.Host,
+		MinVersion:         minVer,
+		MaxVersion:         f.MaxVersion,
+		CipherSuites:       cipherSuites,
+		InsecureSkipVerify: f.InsecureSkipVerify,
 	}
 }
 
@@ -75,12 +116,7 @@ func (f *Receiver) connect(ctx context.Context) (*client.Client, bool, error) {
 	var c *client.Client
 	var tlsOn bool
 	if f.SSL {
-		tlsConfig := &tls.Config{
-			ServerName:         f.Host,
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: f.InsecureSkipVerify,
-		}
-		tlsConn := tls.Client(conn, tlsConfig)
+		tlsConn := tls.Client(conn, f.tlsConfig())
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			_ = tlsConn.Close()
 			return nil, false, fmt.Errorf("imap tls handshake: %w", err)
@@ -100,12 +136,7 @@ func (f *Receiver) connect(ctx context.Context) (*client.Client, bool, error) {
 
 		// Try STARTTLS if not using SSL
 		if ok, _ := c.SupportStartTLS(); ok {
-			tlsConfig := &tls.Config{
-				ServerName:         f.Host,
-				MinVersion:         tls.VersionTLS12,
-				InsecureSkipVerify: f.InsecureSkipVerify,
-			}
-			if err := c.StartTLS(tlsConfig); err != nil {
+			if err := c.StartTLS(f.tlsConfig()); err != nil {
 				_ = c.Logout()
 				return nil, false, fmt.Errorf("imap starttls: %w", err)
 			}
