@@ -596,7 +596,7 @@ func BuildMessage(bufPtr *[]byte, email Email) {
 	}
 
 	if !hasAttachments && !hasBothBodies {
-		// Simple message
+		// Simple message - use base64 encoding so Unicode (emoji, etc.) is preserved through transport and Outlook
 		if !HasHeader(*bufPtr, "Content-Type") {
 			if isHTML {
 				write(HeaderHTML)
@@ -605,8 +605,13 @@ func BuildMessage(bufPtr *[]byte, email Email) {
 			}
 			write("\r\n")
 		}
+		if !HasHeader(*bufPtr, "Content-Transfer-Encoding") {
+			write("Content-Transfer-Encoding: base64\r\n")
+		}
 		write("\r\n")
-		_, _ = writer.Write(mainBody)
+		b64 := base64.NewEncoder(base64.StdEncoding, writer)
+		_, _ = b64.Write(mainBody)
+		_ = b64.Close()
 		write("\r\n")
 		return
 	}

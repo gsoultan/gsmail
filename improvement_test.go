@@ -49,6 +49,28 @@ func TestImprovementHeaders(t *testing.T) {
 	}
 }
 
+func TestImprovementUnicodeBodyEncoding(t *testing.T) {
+	email := Email{
+		From:    "sender@example.com",
+		To:      []string{"to@example.com"},
+		Subject: "Test",
+		Body:    []byte("<html><body>Reminder ⏰ 世界</body></html>"),
+	}
+
+	bufPtr := GetBuffer()
+	defer PutBuffer(bufPtr)
+
+	BuildMessage(bufPtr, email)
+	msg := string(*bufPtr)
+
+	if !strings.Contains(msg, "Content-Transfer-Encoding: base64") {
+		t.Error("Simple message must use base64 for Unicode (emoji, CJK) preservation in Outlook")
+	}
+	if !strings.Contains(msg, "charset=\"UTF-8\"") {
+		t.Error("Must declare UTF-8 charset")
+	}
+}
+
 func TestImprovementSubjectEncoding(t *testing.T) {
 	email := Email{
 		From:    "sender@example.com",
