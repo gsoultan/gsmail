@@ -15,7 +15,7 @@
 - **Bounce & Complaint Handling**: Parse DSN/ARF emails and provider webhooks (SES, SendGrid, etc.).
 - **Advanced SMTP Connection Pooling**: Reuse connections with a configurable `Wait` mechanism, `MaxLifetime`, and observability (`PoolStats`).
 - **Pluggable Receivers**: Receive emails via POP3 and IMAP.
-- **Dynamic Templates**: Built-in support for `text/template` and `html/template`.
+- **Dynamic Templates**: Built-in support for `text/template` and `html/template` with custom template functions.
 - **Flexible Template Loading**: Load templates from strings, HTTP URLs, or AWS S3 compatible storage.
 - **Automatic Content Type Detection**: Automatically detects if an email is HTML or Plaintext based on the content.
 - **Email Validation**: Includes high-performance `IsValidEmail` (regex), `IsDisposableEmail`, and `ValidateEmailExistence` (MX/SMTP check + disposable/temporary email rejection) utilities.
@@ -120,6 +120,40 @@ s3Cfg := gsmail.S3Config{
     SecretKey: "S3_SECRET_KEY",
 }
 err := email.SetBodyFromS3(context.Background(), s3Cfg, data)
+```
+
+### Custom Template Functions
+
+You can register custom functions for use in templates by setting `HTMLFuncs` (for HTML templates) or `TextFuncs` (for plaintext templates) on the email before calling `SetBody`, `SetOutlookBody`, `SetBodyFromURL`, or `SetBodyFromS3`:
+
+```go
+import htmltemplate "html/template"
+
+email := &gsmail.Email{
+    From:    "no-reply@example.com",
+    To:      []string{"user@example.com"},
+    Subject: "Document Request",
+}
+
+// Register custom functions (e.g. Add for 1-based list numbering)
+email.HTMLFuncs = htmltemplate.FuncMap{
+    "Add": func(i int) int { return i + 1 },
+}
+
+data := map[string]interface{}{
+    "JobTitle":      "Software Engineer",
+    "ApplicantName": "John Doe",
+    "DocumentTypes": []struct{ Name string }{{Name: "Resume"}, {Name: "Portfolio"}},
+}
+err := email.SetBody(htmlTemplateString, data)
+```
+
+In your template you can now use `{{Add $index}}` (or any other custom function):
+
+```html
+{{range $index, $val := .DocumentTypes}}
+<p>{{Add $index}}. {{$val.Name}}</p>
+{{end}}
 ```
 
 ### Receiving Emails (IMAP)

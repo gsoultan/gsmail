@@ -39,22 +39,42 @@ func executeTemplate(tmpl templateExecutor, data any, name string) ([]byte, erro
 	return res, nil
 }
 
-// ParseHTMLTemplate parses an HTML template with the given data.
-func ParseHTMLTemplate(tmplStr string, data any) ([]byte, error) {
-	tmpl, err := htmltemplate.New("email").Parse(tmplStr)
+// parseHTMLTemplateWithFuncs parses an HTML template with the given data and optional custom functions.
+func parseHTMLTemplateWithFuncs(tmplStr string, data any, funcs htmltemplate.FuncMap) ([]byte, error) {
+	t := htmltemplate.New("email")
+	if funcs != nil {
+		t = t.Funcs(funcs)
+	}
+
+	tmpl, err := t.Parse(tmplStr)
 	if err != nil {
 		return nil, fmt.Errorf("parse html template: %w", err)
 	}
 	return executeTemplate(tmpl, data, "html")
 }
 
-// ParseTextTemplate parses a text template with the given data.
-func ParseTextTemplate(tmplStr string, data any) ([]byte, error) {
-	tmpl, err := template.New("email").Parse(tmplStr)
+// ParseHTMLTemplate parses an HTML template with the given data.
+func ParseHTMLTemplate(tmplStr string, data any) ([]byte, error) {
+	return parseHTMLTemplateWithFuncs(tmplStr, data, nil)
+}
+
+// parseTextTemplateWithFuncs parses a text template with the given data and optional custom functions.
+func parseTextTemplateWithFuncs(tmplStr string, data any, funcs template.FuncMap) ([]byte, error) {
+	t := template.New("email")
+	if funcs != nil {
+		t = t.Funcs(funcs)
+	}
+
+	tmpl, err := t.Parse(tmplStr)
 	if err != nil {
 		return nil, fmt.Errorf("parse text template: %w", err)
 	}
 	return executeTemplate(tmpl, data, "text")
+}
+
+// ParseTextTemplate parses a text template with the given data.
+func ParseTextTemplate(tmplStr string, data any) ([]byte, error) {
+	return parseTextTemplateWithFuncs(tmplStr, data, nil)
 }
 
 func (e *Email) setBodyFromReader(r io.Reader, data any, sourceName string) error {

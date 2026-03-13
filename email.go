@@ -2,6 +2,8 @@ package gsmail
 
 import (
 	"fmt"
+	htmltemplate "html/template"
+	"text/template"
 )
 
 // Attachment represents an email attachment.
@@ -24,6 +26,10 @@ type Email struct {
 	HTMLBody          []byte
 	Attachments       []Attachment
 	OutlookCompatible bool
+	// HTMLFuncs holds custom functions for HTML templates used with this email.
+	HTMLFuncs htmltemplate.FuncMap
+	// TextFuncs holds custom functions for text templates used with this email.
+	TextFuncs template.FuncMap
 }
 
 // S3Config represents the AWS S3 configuration.
@@ -60,12 +66,12 @@ func (e *Email) IsOutlookCompatible() bool {
 func (e *Email) setBodyBytes(b []byte, data any) error {
 	var err error
 	if IsHTML(b) {
-		e.Body, err = ParseHTMLTemplate(UnsafeBytesToString(b), data)
+		e.Body, err = parseHTMLTemplateWithFuncs(UnsafeBytesToString(b), data, e.HTMLFuncs)
 		if err == nil && e.OutlookCompatible {
 			e.Body = ToOutlookHTML(e.Body)
 		}
 	} else {
-		e.Body, err = ParseTextTemplate(UnsafeBytesToString(b), data)
+		e.Body, err = parseTextTemplateWithFuncs(UnsafeBytesToString(b), data, e.TextFuncs)
 	}
 	if err != nil {
 		return fmt.Errorf("set body: %w", err)
