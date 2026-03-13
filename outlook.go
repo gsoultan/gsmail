@@ -3,6 +3,9 @@ package gsmail
 import (
 	"bytes"
 	"fmt"
+	"regexp"
+	"strings"
+	"unicode/utf8"
 )
 
 var (
@@ -17,6 +20,8 @@ var (
 
 	outlookNamespaces = []byte(` xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns:m="http://schemas.microsoft.com/office/2004/12/omml"`)
 	outlookHeadTags   = []byte(`
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
     <!--[if gte mso 9]>
     <xml>
         <o:OfficeDocumentSettings>
@@ -80,7 +85,14 @@ var (
     </style>
     <![endif]-->
 `)
+
+	emptyTdRe = regexp.MustCompile(`(?i)<td([^>]*)>\s*</td>`)
 )
+
+// fixEmptyTds replaces empty <td></td> cells with &nbsp; so Outlook does not collapse them.
+func fixEmptyTds(html []byte) []byte {
+	return emptyTdRe.ReplaceAll(html, []byte("<td$1>&nbsp;</td>"))
+}
 
 // IsOutlookCompatible checks if the given HTML byte slice contains markers of an Outlook-compatible template.
 func IsOutlookCompatible(html []byte) bool {
@@ -111,7 +123,7 @@ func ToOutlookHTML(html []byte) []byte {
 
 	if htmlIdx == -1 && headIdx == -1 {
 		// Fragment: Wrap in full structure with container table
-		*bufPtr = append(*bufPtr, []byte(`<!DOCTYPE html><html><head>`)...)
+		*bufPtr = append(*bufPtr, []byte(`<!DOCTYPE html><html lang="en"><head>`)...)
 		*bufPtr = append(*bufPtr, outlookHeadTags...)
 		*bufPtr = append(*bufPtr, []byte(`</head><body id="OutlookHolder"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr><td>`)...)
 		appendNormalized(bufPtr, html)
@@ -125,6 +137,9 @@ func ToOutlookHTML(html []byte) []byte {
 				htmlEnd += htmlIdx
 				*bufPtr = append(*bufPtr, html[curr:htmlEnd]...)
 				*bufPtr = append(*bufPtr, outlookNamespaces...)
+				if !bytes.Contains(html[curr:htmlEnd+1], []byte("lang=")) {
+					*bufPtr = append(*bufPtr, []byte(` lang="en"`)...)
+				}
 				*bufPtr = append(*bufPtr, '>')
 				curr = htmlEnd + 1
 			}
@@ -173,7 +188,7 @@ func ToOutlookHTML(html []byte) []byte {
 
 	res := make([]byte, len(*bufPtr))
 	copy(res, *bufPtr)
-	return res
+	return fixEmptyTds(res)
 }
 
 func findTag(html, lower, upper []byte) int {
@@ -260,12 +275,16 @@ func appendNormalized(dest *[]byte, src []byte) {
 }
 
 // MSOTable generates a normalized table for Outlook with standard email-safe attributes.
+// Empty or whitespace-only content is replaced with &nbsp; to prevent Outlook from collapsing cells.
 func MSOTable(width, align, style, content string) string {
 	if align == "" {
 		align = "left"
 	}
 	if width == "" {
 		width = "100%"
+	}
+	if strings.TrimSpace(content) == "" {
+		content = "&nbsp;"
 	}
 	return fmt.Sprintf(`<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="%s" align="%s" style="%s"><tr><td>%s</td></tr></table>`,
 		width, align, style, content)
@@ -289,16 +308,21 @@ func MSOSpacer(height int) string {
 
 // WrapInGhostTable wraps the given HTML in an Outlook MSO conditional table (ghost table).
 // This is useful for enforcing widths on elements that Outlook otherwise ignores (like div width).
+// Empty or whitespace-only content uses &nbsp; to prevent Outlook from collapsing the cell.
 func WrapInGhostTable(html string, width string, align string) string {
 	if align == "" {
 		align = "center"
+	}
+	content := html
+	if strings.TrimSpace(content) == "" {
+		content = "&nbsp;"
 	}
 	return `<!--[if mso]>
     <table role="presentation" width="` + width + `" cellspacing="0" cellpadding="0" border="0" align="` + align + `">
     <tr>
     <td>
     <![endif]-->
-    ` + html + `
+    ` + content + `
     <!--[if mso]>
     </td>
     </tr>
@@ -314,6 +338,66 @@ func MSOOnly(html string) string {
 // HideFromMSO wraps the given HTML to be hidden from Microsoft Outlook.
 func HideFromMSO(html string) string {
 	return `<!--[if !mso]><!-->` + html + `<!--<![endif]-->`
+}
+
+// MSOPreheaderMaxLength is the recommended max length for preheader text in inbox previews (many clients truncate around 50–130 chars).
+const MSOPreheaderMaxLength = 130
+
+// MSOPreheader returns hidden HTML for inbox preview text (preheader). Place it at the top of the body.
+// Most clients show it in the preview pane and hide it when the email is opened.
+func MSOPreheader(text string) string {
+	if text == "" {
+		return ""
+	}
+	return fmt.Sprintf(`<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">%s</div>`, text)
+}
+
+// MSOPreheaderTruncated returns preheader HTML, truncating text to maxLen runes (appends "…" when truncated).
+// Use maxLen 0 or negative for no truncation. MSOPreheaderMaxLength (130) is a common choice.
+func MSOPreheaderTruncated(text string, maxLen int) string {
+	if text == "" {
+		return ""
+	}
+	if maxLen > 0 && utf8.RuneCountInString(text) > maxLen {
+		runes := []rune(text)
+		text = string(runes[:maxLen-1]) + "…"
+	}
+	return MSOPreheader(text)
+}
+
+// MSOSafeFontStack returns an Outlook-safe font stack (Arial, Helvetica, sans-serif).
+// Use this when you need reliable font rendering across Outlook and other email clients.
+func MSOSafeFontStack() string {
+	return "Arial, Helvetica, sans-serif"
+}
+
+// MSOEmailLayout builds a standard Outlook-compatible email structure: preheader, header, body, footer.
+// Width is in pixels (0 means 600). Empty strings skip that section. Use with SetOutlookBody or OutlookCompatible.
+func MSOEmailLayout(width int, preheader, header, body, footer string) string {
+	if width <= 0 {
+		width = 600
+	}
+	widthStr := fmt.Sprintf("%d", width)
+	var parts []string
+	if preheader != "" {
+		parts = append(parts, MSOPreheader(preheader))
+	}
+	content := ""
+	if header != "" {
+		content += header
+	}
+	if body != "" {
+		content += body
+	}
+	if footer != "" {
+		content += footer
+	}
+	if content == "" {
+		content = "&nbsp;"
+	}
+	wrapped := WrapInGhostTable(content, widthStr+"px", "center")
+	parts = append(parts, wrapped)
+	return strings.Join(parts, "\n")
 }
 
 // ButtonConfig represents the configuration for an Outlook-compatible button.
@@ -339,7 +423,7 @@ func MSOButton(cfg ButtonConfig) string {
 		cfg.BgColor = "#007bff"
 	}
 	if cfg.FontFamily == "" {
-		cfg.FontFamily = "sans-serif"
+		cfg.FontFamily = MSOSafeFontStack()
 	}
 	if cfg.FontSize == 0 {
 		cfg.FontSize = 16
@@ -433,6 +517,9 @@ func MSOBackground(url string, color string, width, height int, content string) 
 	} else {
 		fill = fmt.Sprintf(`<v:fill color="%s" />`, color)
 	}
+	if strings.TrimSpace(content) == "" {
+		content = "&nbsp;"
+	}
 
 	return fmt.Sprintf(`
 <div style="background-color:%s; background-image:url('%s'); background-position:center; background-repeat:no-repeat; background-size:cover;">
@@ -485,9 +572,13 @@ func MSOColumns(widths []int, cols ...string) string {
 			*bufPtr = append(*bufPtr, []byte(`<!--[if mso]><td valign="top"><![endif]-->`)...)
 		}
 
-		// Responsive Column wrapper
+		// Responsive Column wrapper (empty col gets &nbsp; to prevent Outlook collapse)
+		colContent := col
+		if strings.TrimSpace(colContent) == "" {
+			colContent = "&nbsp;"
+		}
 		*bufPtr = append(*bufPtr, []byte(fmt.Sprintf(`<div style="display:inline-block; %s vertical-align:top; font-size:16px; width:100%%; max-width:%dpx;">`, wStr, w))...)
-		*bufPtr = append(*bufPtr, []byte(col)...)
+		*bufPtr = append(*bufPtr, []byte(colContent)...)
 		*bufPtr = append(*bufPtr, []byte(`</div>`)...)
 
 		// Outlook Cell End
@@ -517,9 +608,13 @@ func MSOBulletList(items []string, bullet string, style string) string {
 
 	*bufPtr = append(*bufPtr, []byte(`<table role="presentation" border="0" cellspacing="0" cellpadding="0">`)...)
 	for _, item := range items {
+		itemContent := item
+		if strings.TrimSpace(itemContent) == "" {
+			itemContent = "&nbsp;"
+		}
 		*bufPtr = append(*bufPtr, []byte(`<tr>`)...)
 		*bufPtr = append(*bufPtr, []byte(fmt.Sprintf(`<td style="padding:0 10px 0 0; vertical-align:top; %s">%s</td>`, style, bullet))...)
-		*bufPtr = append(*bufPtr, []byte(fmt.Sprintf(`<td style="vertical-align:top; %s">%s</td>`, style, item))...)
+		*bufPtr = append(*bufPtr, []byte(fmt.Sprintf(`<td style="vertical-align:top; %s">%s</td>`, style, itemContent))...)
 		*bufPtr = append(*bufPtr, []byte(`</tr>`)...)
 	}
 	*bufPtr = append(*bufPtr, []byte(`</table>`)...)

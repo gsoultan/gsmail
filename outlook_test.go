@@ -141,6 +141,30 @@ func TestToOutlookHTML(t *testing.T) {
 	}
 }
 
+func TestToOutlookHTML_Lang(t *testing.T) {
+	t.Run("Fragment gets lang", func(t *testing.T) {
+		input := []byte(`<p>Fragment</p>`)
+		output := ToOutlookHTML(input)
+		if !bytes.Contains(output, []byte(`lang="en"`)) {
+			t.Error("Fragment should have lang=\"en\" on html")
+		}
+	})
+	t.Run("Structured without lang gets lang", func(t *testing.T) {
+		input := []byte(`<html><body>Test</body></html>`)
+		output := ToOutlookHTML(input)
+		if !bytes.Contains(output, []byte(`lang="en"`)) {
+			t.Error("Should add lang=\"en\" when missing")
+		}
+	})
+	t.Run("Structured with lang preserved", func(t *testing.T) {
+		input := []byte(`<html lang="fr"><body>Test</body></html>`)
+		output := ToOutlookHTML(input)
+		if !bytes.Contains(output, []byte(`lang="fr"`)) {
+			t.Error("Should preserve existing lang")
+		}
+	})
+}
+
 func TestToOutlookHTML_NoHead(t *testing.T) {
 	input := []byte(`<html><body>Test</body></html>`)
 	output := ToOutlookHTML(input)
@@ -191,21 +215,81 @@ func TestToOutlookHTML_Normalization(t *testing.T) {
 			t.Error("Normalized a table inside a comment")
 		}
 	})
+
+	t.Run("Empty Td Normalization", func(t *testing.T) {
+		input := []byte(`<html><body><table><tr><td></td><td> </td><td>X</td></tr></table></body></html>`)
+		output := ToOutlookHTML(input)
+		if !bytes.Contains(output, []byte(`<td>&nbsp;</td>`)) {
+			t.Error("Empty td should get &nbsp;")
+		}
+		if !bytes.Contains(output, []byte(`<td>X</td>`)) {
+			t.Error("Non-empty td should be preserved")
+		}
+	})
+
+	t.Run("Unicode Support", func(t *testing.T) {
+		// Emoji and other Unicode should be preserved and document should declare UTF-8
+		input := []byte(`<html><body><p>Reminder ⏰ 世界</p></body></html>`)
+		output := ToOutlookHTML(input)
+		if !bytes.Contains(output, []byte(`charset="UTF-8"`)) {
+			t.Error("Missing UTF-8 charset declaration for Unicode support")
+		}
+		if !bytes.Contains(output, []byte("⏰")) {
+			t.Error("Emoji not preserved in output")
+		}
+		if !bytes.Contains(output, []byte("世界")) {
+			t.Error("CJK characters not preserved in output")
+		}
+	})
 }
 
 func TestMSOTable(t *testing.T) {
-	output := MSOTable("600", "center", "color:red;", "Content")
-	if !bytes.Contains([]byte(output), []byte(`width="600"`)) {
-		t.Error("Missing width")
+	t.Run("WithContent", func(t *testing.T) {
+		output := MSOTable("600", "center", "color:red;", "Content")
+		if !bytes.Contains([]byte(output), []byte(`width="600"`)) {
+			t.Error("Missing width")
+		}
+		if !bytes.Contains([]byte(output), []byte(`align="center"`)) {
+			t.Error("Missing align")
+		}
+		if !bytes.Contains([]byte(output), []byte(`style="color:red;"`)) {
+			t.Error("Missing style")
+		}
+		if !bytes.Contains([]byte(output), []byte(`role="presentation"`)) {
+			t.Error("Missing role")
+		}
+		if !bytes.Contains([]byte(output), []byte("Content")) {
+			t.Error("Missing content")
+		}
+	})
+	t.Run("EmptyContentGetsNbsp", func(t *testing.T) {
+		output := MSOTable("100%", "", "", "")
+		if !bytes.Contains([]byte(output), []byte("&nbsp;")) {
+			t.Error("Empty content should use &nbsp; to prevent Outlook collapse")
+		}
+	})
+}
+
+func TestMSOEmailLayout(t *testing.T) {
+	layout := MSOEmailLayout(600, "Preview", "<h1>Header</h1>", "<p>Body</p>", "<small>Footer</small>")
+	if !bytes.Contains([]byte(layout), []byte("Preview")) {
+		t.Error("Missing preheader")
 	}
-	if !bytes.Contains([]byte(output), []byte(`align="center"`)) {
-		t.Error("Missing align")
+	if !bytes.Contains([]byte(layout), []byte("<h1>Header</h1>")) {
+		t.Error("Missing header")
 	}
-	if !bytes.Contains([]byte(output), []byte(`style="color:red;"`)) {
-		t.Error("Missing style")
+	if !bytes.Contains([]byte(layout), []byte("<p>Body</p>")) {
+		t.Error("Missing body")
 	}
-	if !bytes.Contains([]byte(output), []byte(`role="presentation"`)) {
-		t.Error("Missing role")
+	if !bytes.Contains([]byte(layout), []byte("<small>Footer</small>")) {
+		t.Error("Missing footer")
+	}
+	if !bytes.Contains([]byte(layout), []byte(`width="600px"`)) {
+		t.Error("Missing width in ghost table")
+	}
+	layoutBodyOnly := MSOEmailLayout(0, "", "", "Just body", "")
+	if !bytes.Contains([]byte(layoutBodyOnly), []byte("Just body")) {
+		t.Error("Body-only layout should contain body")
 	}
 }
 
@@ -248,6 +332,45 @@ func TestOutlookHelpers(t *testing.T) {
 		wrapped := HideFromMSO(html)
 		if wrapped != "<!--[if !mso]><!-->"+html+"<!--<![endif]-->" {
 			t.Errorf("got %s", wrapped)
+		}
+	})
+
+	t.Run("MSOPreheader", func(t *testing.T) {
+		preheader := MSOPreheader("View in browser")
+		if !bytes.Contains([]byte(preheader), []byte("display:none")) {
+			t.Error("Missing display:none in preheader")
+		}
+		if !bytes.Contains([]byte(preheader), []byte("View in browser")) {
+			t.Error("Missing preheader text")
+		}
+		if MSOPreheader("") != "" {
+			t.Error("Empty preheader should return empty string")
+		}
+	})
+	t.Run("MSOPreheaderTruncated", func(t *testing.T) {
+		short := MSOPreheaderTruncated("Short", 10)
+		if !bytes.Contains([]byte(short), []byte("Short")) {
+			t.Error("Short text should not be truncated")
+		}
+		long := MSOPreheaderTruncated("Hello world this is a very long preheader text that exceeds the limit", 20)
+		if !bytes.Contains([]byte(long), []byte("…")) {
+			t.Error("Long text should be truncated with ellipsis")
+		}
+		if MSOPreheaderTruncated("", 10) != "" {
+			t.Error("Empty should return empty")
+		}
+	})
+	t.Run("WrapInGhostTable empty gets nbsp", func(t *testing.T) {
+		wrapped := WrapInGhostTable("", "600", "center")
+		if !bytes.Contains([]byte(wrapped), []byte("&nbsp;")) {
+			t.Error("Empty WrapInGhostTable content should use &nbsp;")
+		}
+	})
+
+	t.Run("MSOSafeFontStack", func(t *testing.T) {
+		stack := MSOSafeFontStack()
+		if stack != "Arial, Helvetica, sans-serif" {
+			t.Errorf("got %s", stack)
 		}
 	})
 
@@ -334,6 +457,12 @@ func TestOutlookHelpers(t *testing.T) {
 			t.Error("Missing MSO ghost table")
 		}
 	})
+	t.Run("MSOColumns empty col gets nbsp", func(t *testing.T) {
+		cols := MSOColumns([]int{300}, "")
+		if !bytes.Contains([]byte(cols), []byte("&nbsp;")) {
+			t.Error("Empty column should use &nbsp;")
+		}
+	})
 
 	t.Run("MSOBulletList", func(t *testing.T) {
 		list := MSOBulletList([]string{"Item 1", "Item 2"}, ">", "color:red;")
@@ -345,6 +474,18 @@ func TestOutlookHelpers(t *testing.T) {
 		}
 		if !bytes.Contains([]byte(list), []byte(`color:red;`)) {
 			t.Error("Missing custom style")
+		}
+	})
+	t.Run("MSOBulletList empty item gets nbsp", func(t *testing.T) {
+		list := MSOBulletList([]string{""}, "•", "")
+		if !bytes.Contains([]byte(list), []byte("&nbsp;")) {
+			t.Error("Empty list item should use &nbsp;")
+		}
+	})
+	t.Run("MSOBackground empty content gets nbsp", func(t *testing.T) {
+		bg := MSOBackground("", "#fff", 600, 400, "")
+		if !bytes.Contains([]byte(bg), []byte("&nbsp;")) {
+			t.Error("Empty MSOBackground content should use &nbsp;")
 		}
 	})
 }

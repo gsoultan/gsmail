@@ -244,13 +244,24 @@ In addition to the automatic flag, `gsmail` provides helper functions to handle 
 - `MSOBackground(url, color, w, h, content)`: Generates a VML-based background for Outlook.
 - `MSOColumns(widths, cols...)`: Responsive side-by-side columns using ghost tables.
 - `MSOBulletList(items, bullet, style)`: Consistent bulleted lists (avoids Outlook <ul> issues).
+- `MSOPreheader(text)`: Hidden preheader text for inbox preview (place at top of body).
+- `MSOPreheaderTruncated(text, maxLen)`: Preheader with truncation; `MSOPreheaderMaxLength` (130) is a common maxLen.
+- `MSOSafeFontStack()`: Returns an Outlook-safe font stack (Arial, Helvetica, sans-serif).
+- `MSOEmailLayout(width, preheader, header, body, footer)`: Builds a standard email structure with ghost table.
 - `IsOutlookCompatible(html)`: Detects if HTML contains Outlook-specific fixes.
 
-`gsmail` also automatically injects Dark Mode support markers and CSS when Outlook compatibility is enabled, ensuring your emails look great in both light and dark themes.
+`gsmail` also automatically injects UTF-8 charset, `lang` attribute, Dark Mode support markers, and CSS when Outlook compatibility is enabled.
+
+**Outlook best practices:** Use `MSOSafeFontStack()` or `MSOFontStack()` for fonts; avoid `em`/`rem` in MSO-critical styles (use `px`); use tables for layout; declare `charset="UTF-8"` (injected automatically); add `MSOPreheader` at the top of the body for inbox preview. `ToOutlookHTML` automatically replaces empty `<td>` cells with `&nbsp;` to prevent Outlook from collapsing them.
 
 ```go
+// Or use MSOEmailLayout to build preheader + header + body + footer in one call
+body := gsmail.MSOEmailLayout(600, "Preview text", "<h1>Logo</h1>", "<p>Main content</p>", "<small>Footer</small>")
+email.SetOutlookBody("<html><body>"+body+"</body></html>", nil)
+
 data := map[string]interface{}{
-    "Content": gsmail.WrapInGhostTable("<div>My Content</div>", "600", "center"),
+    "Preheader": gsmail.MSOPreheader("View in browser if formatting is broken"),
+    "Content":   gsmail.WrapInGhostTable("<div>My Content</div>", "600", "center"),
     "Button":  gsmail.MSOButton(gsmail.ButtonConfig{
         Text: "Click Here",
         Link: "https://example.com",
