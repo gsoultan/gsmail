@@ -5,6 +5,59 @@ import (
 	"testing"
 )
 
+func extractBase64PayloadLines(msg string) [][]string {
+	lines := strings.Split(msg, "\r\n")
+	payloads := make([][]string, 0)
+
+	for i := range len(lines) {
+		if !strings.EqualFold(lines[i], "Content-Transfer-Encoding: base64") {
+			continue
+		}
+
+		j := i + 1
+		for j < len(lines) && lines[j] != "" {
+			j++
+		}
+		if j >= len(lines)-1 {
+			continue
+		}
+
+		j++
+		payload := make([]string, 0)
+		for j < len(lines) {
+			line := lines[j]
+			if line == "" || strings.HasPrefix(line, "--") {
+				break
+			}
+			payload = append(payload, line)
+			j++
+		}
+
+		if len(payload) > 0 {
+			payloads = append(payloads, payload)
+		}
+	}
+
+	return payloads
+}
+
+func assertMIMEBase64Wrapped(t *testing.T, payload []string) {
+	t.Helper()
+
+	if len(payload) == 0 {
+		t.Fatal("expected base64 payload lines, got none")
+	}
+
+	for i, line := range payload {
+		if len(line) > 76 {
+			t.Fatalf("line %d exceeds MIME base64 max length 76: got %d", i+1, len(line))
+		}
+		if i < len(payload)-1 && len(line) != 76 {
+			t.Fatalf("line %d must be exactly 76 chars for wrapped base64, got %d", i+1, len(line))
+		}
+	}
+}
+
 func TestImprovementHeaders(t *testing.T) {
 	email := Email{
 		From:    "sender@example.com",
@@ -190,5 +243,80 @@ func TestImprovementParseRawEmail(t *testing.T) {
 	}
 	if strings.TrimSpace(string(email.HTMLBody)) != "<html>HTML Body</html>" {
 		t.Errorf("Expected HTMLBody: <html>HTML Body</html>, got %q", string(email.HTMLBody))
+	}
+}
+
+func TestImprovementSimpleBase64BodyIsWrappedAt76Chars(t *testing.T) {
+	email := Email{
+		From:    "sender@example.com",
+		To:      []string{"to@example.com"},
+		Subject: "Simple Wrapped Base64",
+		Body:    []byte(strings.Repeat("A", 120)),
+	}
+
+	bufPtr := GetBuffer()
+	defer PutBuffer(bufPtr)
+
+	BuildMessage(bufPtr, email)
+	payloads := extractBase64PayloadLines(string(*bufPtr))
+
+	if len(payloads) != 1 {
+		t.Fatalf("expected exactly 1 base64 payload, got %d", len(payloads))
+	}
+
+	assertMIMEBase64Wrapped(t, payloads[0])
+}
+
+func TestImprovementMultipartAlternativeBase64BodiesAreWrappedAt76Chars(t *testing.T) {
+	email := Email{
+		From:     "sender@example.com",
+		To:       []string{"to@example.com"},
+		Subject:  "Multipart Wrapped Base64",
+		Body:     []byte(strings.Repeat("P", 120)),
+		HTMLBody: []byte("<p>" + strings.Repeat("H", 120) + "</p>"),
+	}
+
+	bufPtr := GetBuffer()
+	defer PutBuffer(bufPtr)
+
+	BuildMessage(bufPtr, email)
+	payloads := extractBase64PayloadLines(string(*bufPtr))
+
+	if len(payloads) != 2 {
+		t.Fatalf("expected exactly 2 base64 payloads for multipart/alternative, got %d", len(payloads))
+	}
+
+	for _, payload := range payloads {
+		assertMIMEBase64Wrapped(t, payload)
+	}
+}
+
+func TestImprovementAttachmentBase64IsWrappedAt76Chars(t *testing.T) {
+	email := Email{
+		From:    "sender@example.com",
+		To:      []string{"to@example.com"},
+		Subject: "Attachment Wrapped Base64",
+		Body:    []byte(strings.Repeat("B", 120)),
+		Attachments: []Attachment{
+			{
+				Filename:    "large.bin",
+				ContentType: "application/octet-stream",
+				Data:        []byte(strings.Repeat("Z", 200)),
+			},
+		},
+	}
+
+	bufPtr := GetBuffer()
+	defer PutBuffer(bufPtr)
+
+	BuildMessage(bufPtr, email)
+	payloads := extractBase64PayloadLines(string(*bufPtr))
+
+	if len(payloads) != 2 {
+		t.Fatalf("expected exactly 2 base64 payloads for body + attachment, got %d", len(payloads))
+	}
+
+	for _, payload := range payloads {
+		assertMIMEBase64Wrapped(t, payload)
 	}
 }

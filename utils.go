@@ -542,6 +542,49 @@ func encodeHeader(s string) string {
 	return s
 }
 
+type base64MIMEWriter struct {
+	w   io.Writer
+	col int
+}
+
+func (w *base64MIMEWriter) Write(p []byte) (int, error) {
+	written := 0
+
+	for len(p) > 0 {
+		if w.col == 76 {
+			if _, err := w.w.Write([]byte("\r\n")); err != nil {
+				return written, err
+			}
+			w.col = 0
+		}
+
+		n := min(76-w.col, len(p))
+		nn, err := w.w.Write(p[:n])
+		written += nn
+		w.col += nn
+		if err != nil {
+			return written, err
+		}
+		if nn < n {
+			return written, io.ErrShortWrite
+		}
+
+		p = p[n:]
+	}
+
+	return written, nil
+}
+
+func writeMIMEBase64(w io.Writer, b []byte) error {
+	wrapped := &base64MIMEWriter{w: w}
+	enc := base64.NewEncoder(base64.StdEncoding, wrapped)
+	if _, err := enc.Write(b); err != nil {
+		_ = enc.Close()
+		return err
+	}
+	return enc.Close()
+}
+
 // BuildMessage builds the full RFC822 email message into the provided buffer.
 func BuildMessage(bufPtr *[]byte, email Email) {
 	writer := NewBufferWriter(bufPtr)
@@ -609,9 +652,7 @@ func BuildMessage(bufPtr *[]byte, email Email) {
 			write("Content-Transfer-Encoding: base64\r\n")
 		}
 		write("\r\n")
-		b64 := base64.NewEncoder(base64.StdEncoding, writer)
-		_, _ = b64.Write(mainBody)
-		_ = b64.Close()
+		_ = writeMIMEBase64(writer, mainBody)
 		write("\r\n")
 		return
 	}
@@ -650,18 +691,14 @@ func BuildMessage(bufPtr *[]byte, email Email) {
 		textHeader.Set("Content-Type", "text/plain; charset=\"UTF-8\"")
 		textHeader.Set("Content-Transfer-Encoding", "base64")
 		textPart, _ := amw.CreatePart(textHeader)
-		b64Text := base64.NewEncoder(base64.StdEncoding, textPart)
-		_, _ = b64Text.Write(email.Body)
-		_ = b64Text.Close()
+		_ = writeMIMEBase64(textPart, email.Body)
 
 		// HTML part
 		htmlHeader := make(textproto.MIMEHeader)
 		htmlHeader.Set("Content-Type", "text/html; charset=\"UTF-8\"")
 		htmlHeader.Set("Content-Transfer-Encoding", "base64")
 		htmlPart, _ := amw.CreatePart(htmlHeader)
-		b64HTML := base64.NewEncoder(base64.StdEncoding, htmlPart)
-		_, _ = b64HTML.Write(email.HTMLBody)
-		_ = b64HTML.Close()
+		_ = writeMIMEBase64(htmlPart, email.HTMLBody)
 
 		if hasAttachments {
 			_ = amw.Close()
@@ -677,9 +714,7 @@ func BuildMessage(bufPtr *[]byte, email Email) {
 		header.Set("Content-Transfer-Encoding", "base64")
 
 		part, _ := mw.CreatePart(header)
-		b64 := base64.NewEncoder(base64.StdEncoding, part)
-		_, _ = b64.Write(mainBody)
-		_ = b64.Close()
+		_ = writeMIMEBase64(part, mainBody)
 	}
 
 	// Attachments
@@ -701,9 +736,7 @@ func BuildMessage(bufPtr *[]byte, email Email) {
 			attHeader.Set("Content-Disposition", disposition)
 
 			part, _ := mw.CreatePart(attHeader)
-			b64Writer := base64.NewEncoder(base64.StdEncoding, part)
-			_, _ = b64Writer.Write(att.Data)
-			_ = b64Writer.Close()
+			_ = writeMIMEBase64(part, att.Data)
 		}
 	}
 

@@ -275,7 +275,12 @@ email.SetOutlookBody("<html>...</html>", data)
 ```
 
 ### Outlook Compatibility Helpers
-
+The issue is in GSMail library itself (utils.go). Go's base64.NewEncoder writes raw base64 without line breaks. Even with multipart/alternative, the base64 content is still written as a single long line.
+// GSMail utils.go line 652-655
+b64Text := base64.NewEncoder(base64.StdEncoding, textPart)
+_, _ = b64Text.Write(email.Body)
+_ = b64Text.Close()
+The MIME standard requires base64 to be wrapped at 76 characters, but GSMail doesn't do thi
 In addition to the automatic flag, `gsmail` provides helper functions to handle common Outlook layout issues:
 
 - `WrapInGhostTable(html, width, align)`: Wraps content in a conditional MSO table to enforce widths.
