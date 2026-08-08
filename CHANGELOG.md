@@ -8,32 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the module is at `v0`, breaking changes ship in minor releases. Read the
 **Breaking** section before upgrading.
 
-## [Unreleased]
-
-### Fixed
-
-- **SMTP retried permanent delivery failures.** A `550` reply was wrapped in a
-  plain error, so `IsRetryable` defaulted to true and the message was sent four
-  times. Repeated delivery to an address the receiver has already rejected is
-  not just wasted work, it is a deliverability signal counted against the
-  sender. SMTP reply codes are now classified the way RFC 5321 defines them:
-  4xx transient, 5xx permanent. This is what `HTTPError` already did for the
-  API-backed providers.
-
-### Added
-
-- **`providertest.RunSMTP`**, extending the conformance suite to SMTP. It
-  asserts the same message-level contract as the HTTP suite against a message
-  decoded off the wire, plus the cases only SMTP has: Bcc must reach RCPT TO
-  and must *not* appear in the message headers, and a generated message must
-  carry Date and Message-ID. The SMTP sender is run through it both with and
-  without the connection pool.
-
-  It found the 550 retry bug above on its first run, which is the second time
-  extending this suite to a new transport has immediately turned up a real
-  defect.
-
-## [Unreleased]
+## [v0.8.0]
 
 ### Breaking
 
@@ -73,6 +48,37 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
 
 ### Added
 
+- **RFC 8058 one-click unsubscribe.** Gmail and Yahoo have required this of
+  bulk senders since February 2024, and the requirement is a *pair* of
+  headers. `SetOneClickUnsubscribe` sets both and insists on an https target;
+  `RequireOneClickUnsubscribe` refuses to send without them. Plain http is
+  rejected: an unsubscribe URL carries a token identifying the recipient.
+
+- **`FailoverSender` and `RateLimitedSender`.** Failover moves on only for
+  failures worth retrying elsewhere -- a permanent rejection means the message
+  is the problem, not the provider. Rate limiting avoids provoking a 429
+  rather than reacting to one; `Limiter` is an interface and `TokenBucket` is
+  included so the common case needs no new dependency.
+
+- **`CachingTokenSource`.** `TokenSource` is called on every send and every
+  retry, so an uncached one is a round trip per message. Refresh is
+  single-flighted and renews ahead of expiry.
+
+- **`gsmailtest`.** `providertest` serves provider authors; this serves the
+  far larger group writing applications with gsmail, who were all writing the
+  same fake sender. Recorded messages are snapshots, address matching is
+  normalised, and failure messages print what *was* sent.
+
+- **OpenTelemetry metrics** in `otelgs`. Tracing answers "what happened to
+  this message"; metrics answer "is sending healthy right now". Errors are
+  split into permanent and retryable series, since that decides whether to
+  page. No attribute carries an address or subject -- unbounded cardinality as
+  well as a privacy problem.
+
+## [v0.7.0]
+
+### Added
+
 - **Suppression.** `ParseBounce` and the webhook parsers told you an address
   was dead and nothing consumed that, so the next send went out anyway --
   which made bounce handling decorative. `Suppressor` is a one-method
@@ -102,32 +108,32 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
   because deletion is irreversible; it deletes only messages that were both
   retrieved and parsed, and only after the whole batch succeeded.
 
-- **RFC 8058 one-click unsubscribe.** Gmail and Yahoo have required this of
-  bulk senders since February 2024, and the requirement is a *pair* of
-  headers. `SetOneClickUnsubscribe` sets both and insists on an https target;
-  `RequireOneClickUnsubscribe` refuses to send without them. Plain http is
-  rejected: an unsubscribe URL carries a token identifying the recipient.
+## [v0.6.0]
 
-- **`FailoverSender` and `RateLimitedSender`.** Failover moves on only for
-  failures worth retrying elsewhere -- a permanent rejection means the message
-  is the problem, not the provider. Rate limiting avoids provoking a 429
-  rather than reacting to one; `Limiter` is an interface and `TokenBucket` is
-  included so the common case needs no new dependency.
+Tests, documentation and one delivery fix. No API changes.
 
-- **`CachingTokenSource`.** `TokenSource` is called on every send and every
-  retry, so an uncached one is a round trip per message. Refresh is
-  single-flighted and renews ahead of expiry.
+### Fixed
 
-- **`gsmailtest`.** `providertest` serves provider authors; this serves the
-  far larger group writing applications with gsmail, who were all writing the
-  same fake sender. Recorded messages are snapshots, address matching is
-  normalised, and failure messages print what *was* sent.
+- **SMTP retried permanent delivery failures.** A `550` reply was wrapped in a
+  plain error, so `IsRetryable` defaulted to true and the message was sent four
+  times. Repeated delivery to an address the receiver has already rejected is
+  not just wasted work, it is a deliverability signal counted against the
+  sender. SMTP reply codes are now classified the way RFC 5321 defines them:
+  4xx transient, 5xx permanent. This is what `HTTPError` already did for the
+  API-backed providers.
 
-- **OpenTelemetry metrics** in `otelgs`. Tracing answers "what happened to
-  this message"; metrics answer "is sending healthy right now". Errors are
-  split into permanent and retryable series, since that decides whether to
-  page. No attribute carries an address or subject -- unbounded cardinality as
-  well as a privacy problem.
+### Added
+
+- **`providertest.RunSMTP`**, extending the conformance suite to SMTP. It
+  asserts the same message-level contract as the HTTP suite against a message
+  decoded off the wire, plus the cases only SMTP has: Bcc must reach RCPT TO
+  and must *not* appear in the message headers, and a generated message must
+  carry Date and Message-ID. The SMTP sender is run through it both with and
+  without the connection pool.
+
+  It found the 550 retry bug above on its first run, which is the second time
+  extending this suite to a new transport has immediately turned up a real
+  defect.
 
 ## [v0.5.0]
 
