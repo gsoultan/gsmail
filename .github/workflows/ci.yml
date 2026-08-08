@@ -98,3 +98,30 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+
+  fuzz:
+    # A short smoke fuzz on every push. It will not find a deep bug in 40
+    # seconds, but it exercises the seed corpus and every crasher committed
+    # under testdata/, so a regression that reintroduces a known-bad input
+    # fails here rather than in someone's inbox.
+    name: fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Fuzz the parsers and the HTML builders
+        run: |
+          set -euo pipefail
+          # One package at a time: go test allows a single -fuzz target per run.
+          for pkg in . ./outlook; do
+            for target in $(go test "$pkg" -list 'Fuzz.*' | grep '^Fuzz' || true); do
+              echo "::group::$pkg $target"
+              go test "$pkg" -run '^$' -fuzz "^${target}$" -fuzztime=40s
+              echo "::endgroup::"
+            done
+          done

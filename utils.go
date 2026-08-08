@@ -512,10 +512,16 @@ func ParseRawEmail(raw []byte) (Email, error) {
 	dec := new(mime.WordDecoder)
 	subject, _ := dec.DecodeHeader(msg.Header.Get("Subject"))
 
+	// Sanitise at the boundary. A malformed header can carry a bare CR --
+	// net/mail accepts "To:0\r0" -- and once that value is inside an Email it
+	// travels wherever the caller takes it: a log line, a datastore, a reply
+	// built by a different mailer. FormatAddress refuses such a value on the
+	// way out, but relying on every consumer to re-check is how one of them
+	// eventually does not.
 	email := Email{
-		From:    msg.Header.Get("From"),
-		Subject: subject,
-		ReplyTo: msg.Header.Get("Reply-To"),
+		From:    sanitizeHeaderValue(msg.Header.Get("From")),
+		Subject: sanitizeHeaderValue(subject),
+		ReplyTo: sanitizeHeaderValue(msg.Header.Get("Reply-To")),
 	}
 
 	if to := msg.Header.Get("To"); to != "" {
@@ -552,11 +558,13 @@ func parseAddressList(s string) []string {
 	if addrs, err := mail.ParseAddressList(s); err == nil {
 		out := make([]string, 0, len(addrs))
 		for _, a := range addrs {
-			if a.Name == "" {
-				out = append(out, a.Address)
-				continue
+			formatted := a.Address
+			if a.Name != "" {
+				formatted = a.String()
 			}
-			out = append(out, a.String())
+			if entry := usableAddress(formatted); entry != "" {
+				out = append(out, entry)
+			}
 		}
 		return out
 	}
@@ -565,11 +573,27 @@ func parseAddressList(s string) []string {
 	parts := strings.Split(s, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
+		if entry := usableAddress(p); entry != "" {
+			out = append(out, entry)
 		}
 	}
 	return out
+}
+
+// usableAddress trims an address and rejects one carrying a character that
+// cannot appear in a header field.
+//
+// It drops rather than strips. Removing the control characters from "0\r0"
+// would yield "00", a plausible-looking address that nobody ever wrote;
+// reporting one recipient fewer from an already-malformed header is the
+// smaller lie. This matches FormatAddress, which returns "" for the same
+// input on the way out.
+func usableAddress(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.ContainsFunc(s, isIllegalHeaderRune) {
+		return ""
+	}
+	return s
 }
 
 func parseFallbackBody(email Email, r io.Reader) Email {
@@ -802,10 +826,25 @@ func FormatAddress(s string) string {
 	return s
 }
 
+// ErrIllegalAddress is returned for an address containing a character that
+// cannot appear in a header field or an SMTP command.
+var ErrIllegalAddress = errors.New("gsmail: address contains an illegal character")
+
 // ParseEmailAddress parses an email address that can be in the form of "Name <email@example.com>" or just "email@example.com".
+//
+// An address carrying a control character is rejected outright. The lenient
+// fallback below exists for real headers that net/mail will not accept -- an
+// unquoted comma in a display name, say -- but it used to hand back whatever
+// sat between the angle brackets, so "<0\n0>" produced an address containing a
+// newline. Callers put that straight into a header or an SMTP command, and
+// while net/smtp happens to reject CR and LF in a command argument, relying on
+// a downstream library's check for a value this one produced is not a defence.
 func ParseEmailAddress(s string) (*mail.Address, error) {
 	if s == "" {
 		return nil, nil
+	}
+	if strings.ContainsFunc(s, isIllegalHeaderRune) {
+		return nil, ErrIllegalAddress
 	}
 	a, err := mail.ParseAddress(s)
 	if err == nil {
