@@ -106,6 +106,27 @@ This breaks anyone assigning HTML to `Body` directly. Move it to `HTMLBody`.
 > sentence lost a word. It now requires a character that may legally follow a
 > tag name. That reduces the damage; it does not remove the design problem.
 
+### `Email` carries receiver-only fields
+
+`Email.UID` and `Email.Mailbox` were added so IMAP message operations had a
+stable identifier to act on. They are set by receivers, meaningless when
+sending, and ignored by every `Sender`.
+
+That works, but it puts receive-side state on a type shared with the send
+path, and freezing it means `Email` permanently describes both. The
+alternative — a distinct `Message` type for fetched mail, embedding or
+wrapping `Email` — is cleaner but doubles the surface a caller has to learn
+and forces a conversion on the common "fetch, then reply" path.
+
+**Recommendation:** keep them. Two fields documented as receiver-set is a
+smaller cost than a second type, and the alternative can still be added later
+as a superset without breaking `Email`. Revisit only if receivers accumulate
+more state; if a third such field appears, that is the signal to split.
+
+This entry exists because the fields landed *after* the rest of this document
+was written, and were flagged in a pull request comment rather than here —
+which is exactly how an audit stops being trustworthy.
+
 ### Mutable exported configuration read during `Send`
 
 `smtp.Sender.Host`, `.AuthMethod`, `.DKIMConfig`, `imap.Receiver.*` and the
