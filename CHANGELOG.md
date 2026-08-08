@@ -8,7 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the module is at `v0`, breaking changes ship in minor releases. Read the
 **Breaking** section before upgrading.
 
-## [Unreleased]
+## [v0.8.1]
+
+A patch release: two parser fixes, fuzzing, and the documentation that should
+have shipped alongside the features in v0.8.0. No API changes.
 
 ### Fixed
 
@@ -48,6 +51,14 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
   committed crasher, so regression protection costs nothing on each push;
   discovery — which wants minutes per target — runs nightly in its own
   workflow rather than blocking a pull request.
+
+- **A package overview and twenty runnable examples.** pkg.go.dev previously
+  showed a single sentence for the whole library, and there were no `Example`
+  functions at all. Fourteen of the examples execute as tests, favouring the
+  cases that are easy to get wrong — a soft bounce does not suppress,
+  one-click unsubscribe needs an https target, an address containing a line
+  break is dropped rather than escaped — so the documentation and the
+  behaviour cannot drift apart.
 
 ## [v0.8.0]
 
