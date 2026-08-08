@@ -53,7 +53,7 @@ func NewHTTPError(provider string, resp *http.Response) *HTTPError {
 	e := &HTTPError{
 		Provider:   provider,
 		StatusCode: resp.StatusCode,
-		Delay:      ParseRetryAfter(resp.Header.Get("Retry-After")),
+		Delay:      parseRetryAfter(resp.Header.Get("Retry-After")),
 	}
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyLen+1))
@@ -87,10 +87,10 @@ func DrainAndClose(body io.ReadCloser) {
 	_ = body.Close()
 }
 
-// ParseRetryAfter parses an HTTP Retry-After header, which is either a number
+// parseRetryAfter parses an HTTP Retry-After header, which is either a number
 // of seconds or an HTTP date. It returns 0 when the value is absent or
-// unparseable.
-func ParseRetryAfter(v string) time.Duration {
+// unparseable. NewHTTPError applies it, so providers do not call it directly.
+func parseRetryAfter(v string) time.Duration {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0

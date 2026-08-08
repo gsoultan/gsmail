@@ -72,7 +72,7 @@ func TestImprovementHeaders(t *testing.T) {
 	bufPtr := getBuffer()
 	defer putBuffer(bufPtr)
 
-	if err := BuildMessage(bufPtr, email); err != nil {
+	if err := buildMessage(bufPtr, email); err != nil {
 		t.Fatalf("BuildMessage: %v", err)
 	}
 	msg := string(*bufPtr)
@@ -115,7 +115,7 @@ func TestImprovementUnicodeBodyEncoding(t *testing.T) {
 	bufPtr := getBuffer()
 	defer putBuffer(bufPtr)
 
-	if err := BuildMessage(bufPtr, email); err != nil {
+	if err := buildMessage(bufPtr, email); err != nil {
 		t.Fatalf("BuildMessage: %v", err)
 	}
 	msg := string(*bufPtr)
@@ -139,7 +139,7 @@ func TestImprovementSubjectEncoding(t *testing.T) {
 	bufPtr := getBuffer()
 	defer putBuffer(bufPtr)
 
-	if err := BuildMessage(bufPtr, email); err != nil {
+	if err := buildMessage(bufPtr, email); err != nil {
 		t.Fatalf("BuildMessage: %v", err)
 	}
 	msg := string(*bufPtr)
@@ -162,7 +162,7 @@ func TestImprovementMultipartAlternative(t *testing.T) {
 	bufPtr := getBuffer()
 	defer putBuffer(bufPtr)
 
-	if err := BuildMessage(bufPtr, email); err != nil {
+	if err := buildMessage(bufPtr, email); err != nil {
 		t.Fatalf("BuildMessage: %v", err)
 	}
 	msg := string(*bufPtr)
@@ -201,7 +201,7 @@ func TestImprovementInlineAttachment(t *testing.T) {
 	bufPtr := getBuffer()
 	defer putBuffer(bufPtr)
 
-	if err := BuildMessage(bufPtr, email); err != nil {
+	if err := buildMessage(bufPtr, email); err != nil {
 		t.Fatalf("BuildMessage: %v", err)
 	}
 	msg := string(*bufPtr)
@@ -267,7 +267,7 @@ func TestImprovementSimpleBase64BodyIsWrappedAt76Chars(t *testing.T) {
 	bufPtr := getBuffer()
 	defer putBuffer(bufPtr)
 
-	if err := BuildMessage(bufPtr, email); err != nil {
+	if err := buildMessage(bufPtr, email); err != nil {
 		t.Fatalf("BuildMessage: %v", err)
 	}
 	payloads := extractBase64PayloadLines(string(*bufPtr))
@@ -291,7 +291,7 @@ func TestImprovementMultipartAlternativeBase64BodiesAreWrappedAt76Chars(t *testi
 	bufPtr := getBuffer()
 	defer putBuffer(bufPtr)
 
-	if err := BuildMessage(bufPtr, email); err != nil {
+	if err := buildMessage(bufPtr, email); err != nil {
 		t.Fatalf("BuildMessage: %v", err)
 	}
 	payloads := extractBase64PayloadLines(string(*bufPtr))
@@ -323,7 +323,7 @@ func TestImprovementAttachmentBase64IsWrappedAt76Chars(t *testing.T) {
 	bufPtr := getBuffer()
 	defer putBuffer(bufPtr)
 
-	if err := BuildMessage(bufPtr, email); err != nil {
+	if err := buildMessage(bufPtr, email); err != nil {
 		t.Fatalf("BuildMessage: %v", err)
 	}
 	payloads := extractBase64PayloadLines(string(*bufPtr))

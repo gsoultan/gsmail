@@ -35,6 +35,42 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
 
 ## [Unreleased]
 
+### Breaking
+
+- **The deprecated Outlook aliases are gone.** The `MSO*` builders,
+  `ToOutlookHTML`, `IsOutlookCompatible`, `ButtonConfig` and
+  `MSOPreheaderMaxLength` now live only in `github.com/gsoultan/gsmail/outlook`.
+  Change the import and drop the `gsmail.` prefix; the functions are unchanged.
+
+- **Providers no longer sniff `Body` for markup.** `Body` is `text/plain` and
+  `HTMLBody` is `text/html`, as the field names always said. Six sites across
+  four providers each re-derived this, and the heuristic misread ordinary
+  prose: `"Please review <p1> pricing"` was sent as HTML and the recipient's
+  renderer swallowed the pseudo-tag, losing a word from the sentence.
+
+  If you assign HTML to `Body` directly, move it to `HTMLBody`. `SetBody`
+  is unaffected — it already routes HTML to `HTMLBody`, and sniffing a
+  *template* is a convenience the caller opted into rather than a guess about
+  a field. `providertest.RoutesBodiesByField` prevents any provider
+  reintroducing it.
+
+- **`ValidateEmailExistence` is removed.** Deprecated since v0.5.0. Callback
+  verification is unreliable and gets the sending host blocklisted; build a
+  `Validator` and read the caveats on `CheckMailbox`.
+
+- **Internal plumbing is no longer exported:** `BuildMessage`, `HasHeader` and
+  `ParseRetryAfter`. `BuildMessage`'s `*[]byte` parameter existed so a pooled
+  buffer could be reused, which is an implementation detail rather than an
+  API — use `RenderMessage` for a message you keep or `WithMessage` for one you
+  only read. `NewHTTPError` and `DrainAndClose` remain exported: an out-of-tree
+  provider needs both to participate in the retry contract.
+
+### Changed
+
+- Every provider type now documents that its fields are read on each operation
+  and must be configured before first use. `SetRetryConfig` is the exception
+  and is safe to call at any time.
+
 ### Added
 
 - **Suppression.** `ParseBounce` and the webhook parsers told you an address

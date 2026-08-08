@@ -46,6 +46,10 @@ func RunSMTP(t *testing.T, h SMTPHarness) {
 		assertRecipients(t, h.capture(t, recipientEmail()))
 	})
 
+	t.Run("RoutesBodiesByField", func(t *testing.T) {
+		assertBodyRouting(t, h.capture(t, bodyRoutingEmail()))
+	})
+
 	// Bcc recipients belong in the envelope only. Writing them into the
 	// message header discloses them to every other recipient.
 	t.Run("BccIsEnvelopeOnly", func(t *testing.T) {

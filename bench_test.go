@@ -85,7 +85,7 @@ func BenchmarkHasHeader(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = HasHeader(raw, "Content-Type")
+		_ = hasHeader(raw, "Content-Type")
 	}
 }
 

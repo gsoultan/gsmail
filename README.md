@@ -331,16 +331,15 @@ In addition to the automatic flag, `gsmail` provides helper functions to handle 
 - `MSOEmailLayout(width, preheader, header, body, footer)`: Builds a standard email structure with ghost table.
 - `IsOutlookCompatible(html)`: Detects if HTML contains Outlook-specific fixes.
 
-These live in `github.com/gsoultan/gsmail/outlook`:
+These live in `github.com/gsoultan/gsmail/outlook`. The deprecated aliases in
+the root package have been removed — change the import and drop the `gsmail.`
+prefix:
 
 ```go
 import "github.com/gsoultan/gsmail/outlook"
 
 btn := outlook.MSOButton(outlook.ButtonConfig{Text: "Confirm", Link: "https://example.com/confirm"})
 ```
-
-Deprecated aliases remain in the root `gsmail` package so existing code keeps
-compiling; they will be removed at v1.
 
 #### What these helpers escape
 
