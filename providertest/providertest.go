@@ -215,12 +215,16 @@ func testBasic(t *testing.T, h Harness) {
 	}
 }
 
+// bccAddress is the Bcc recipient used by recipientEmail. Named so the
+// fixture and the assertions cannot drift apart.
+const bccAddress = "d@example.com"
+
 // recipientEmail exercises To, Cc and Bcc together.
 func recipientEmail() gsmail.Email {
 	e := basicEmail()
 	e.To = []string{"a@example.com", "b@example.com"}
 	e.Cc = []string{"c@example.com"}
-	e.Bcc = []string{"d@example.com"}
+	e.Bcc = []string{bccAddress}
 	return e
 }
 

@@ -53,12 +53,29 @@ func RunSMTP(t *testing.T, h SMTPHarness) {
 		if len(got.Bcc) != 1 {
 			t.Errorf("Bcc recipient missing from RCPT TO: %v", got.Bcc)
 		}
-		headers, _, _ := strings.Cut(raw, "\r\n\r\n")
-		if strings.Contains(strings.ToLower(headers), "bcc:") {
-			t.Errorf("Bcc leaked into the message headers:\n%s", headers)
+
+		msg, err := mail.ReadMessage(strings.NewReader(raw))
+		if err != nil {
+			t.Fatalf("delivered message has unreadable headers: %v", err)
 		}
-		if strings.Contains(headers, "d@example.com") {
-			t.Errorf("the Bcc address appears in the headers:\n%s", headers)
+		if v := msg.Header.Get("Bcc"); v != "" {
+			t.Errorf("a Bcc header was written to the message: %q", v)
+		}
+
+		// Compare parsed addresses rather than searching the header block for
+		// the string. The generated Message-ID ends in random hex, so roughly
+		// one run in sixteen produces "<...d@example.com>" and a substring
+		// match reports a leak that is not there.
+		for _, field := range []string{"To", "Cc", "Reply-To"} {
+			list, err := msg.Header.AddressList(field)
+			if err != nil {
+				continue
+			}
+			for _, a := range list {
+				if a.Address == bccAddress {
+					t.Errorf("the Bcc address %s appears in the %s header", bccAddress, field)
+				}
+			}
 		}
 	})
 
