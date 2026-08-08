@@ -33,6 +33,66 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
   extending this suite to a new transport has immediately turned up a real
   defect.
 
+## [Unreleased]
+
+### Added
+
+- **Suppression.** `ParseBounce` and the webhook parsers told you an address
+  was dead and nothing consumed that, so the next send went out anyway --
+  which made bounce handling decorative. `Suppressor` is a one-method
+  interface over whatever store holds your bounce history;
+  `SuppressionInterceptor` removes suppressed recipients and fails the send
+  with `ErrAllRecipientsSuppressed` when none remain.
+
+  It fails closed: a list that cannot be reached is not evidence an address is
+  deliverable. Only hard bounces suppress, because a soft bounce is a full
+  mailbox and suppressing on one permanently cuts off a live recipient.
+  Addresses are normalised via `NormalizeAddress`, so a bounce recorded for
+  `Alice <Alice@Example.COM>` suppresses `alice@example.com`.
+
+- **Mailbox selection and IMAP message operations.** `INBOX` was hardcoded in
+  three places, so Archive, labels and shared folders were unreachable.
+  `imap.Receiver.Mailbox` selects the folder and `Mailboxes()` lists them.
+
+  Nothing could be modified either, so every poll re-processed the same
+  messages. Fetches now carry `Email.UID` and `Email.Mailbox`, and
+  `MarkSeen`, `MarkUnseen`, `Flag`, `Unflag`, `MarkDeleted`, `Delete`, `Move`
+  and `UIDsOf` act on them. `Delete` expunges, because setting `\Deleted`
+  alone leaves the message visible to other clients. An empty UID set is
+  refused rather than ignored: an empty `SeqSet` can be read as *everything*.
+
+- **`pop3.Receiver.DeleteAfterRetrieve`.** POP3 has no server-side read state,
+  so without `DELE` every poll returns the whole mailbox again. Off by default
+  because deletion is irreversible; it deletes only messages that were both
+  retrieved and parsed, and only after the whole batch succeeded.
+
+- **RFC 8058 one-click unsubscribe.** Gmail and Yahoo have required this of
+  bulk senders since February 2024, and the requirement is a *pair* of
+  headers. `SetOneClickUnsubscribe` sets both and insists on an https target;
+  `RequireOneClickUnsubscribe` refuses to send without them. Plain http is
+  rejected: an unsubscribe URL carries a token identifying the recipient.
+
+- **`FailoverSender` and `RateLimitedSender`.** Failover moves on only for
+  failures worth retrying elsewhere -- a permanent rejection means the message
+  is the problem, not the provider. Rate limiting avoids provoking a 429
+  rather than reacting to one; `Limiter` is an interface and `TokenBucket` is
+  included so the common case needs no new dependency.
+
+- **`CachingTokenSource`.** `TokenSource` is called on every send and every
+  retry, so an uncached one is a round trip per message. Refresh is
+  single-flighted and renews ahead of expiry.
+
+- **`gsmailtest`.** `providertest` serves provider authors; this serves the
+  far larger group writing applications with gsmail, who were all writing the
+  same fake sender. Recorded messages are snapshots, address matching is
+  normalised, and failure messages print what *was* sent.
+
+- **OpenTelemetry metrics** in `otelgs`. Tracing answers "what happened to
+  this message"; metrics answer "is sending healthy right now". Errors are
+  split into permanent and retryable series, since that decides whether to
+  page. No attribute carries an address or subject -- unbounded cardinality as
+  well as a privacy problem.
+
 ## [v0.5.0]
 
 ### Added

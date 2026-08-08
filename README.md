@@ -515,6 +515,109 @@ if !health.SPF.Valid {
 }
 ```
 
+### Suppression: acting on bounces
+
+Parsing a bounce is only useful if something stops the next send. Wire the
+webhook output into a suppression list and the list into your sender:
+
+```go
+list := gsmail.NewMemorySuppressionList()
+
+// in your webhook handler, after verifying the signature
+event, _ := gsmail.ParseSESWebhook(msg.Message)
+list.Record(event)               // hard bounces and complaints only
+
+// wherever you build the sender
+sender = gsmail.WrapSender(sender, gsmail.SuppressionInterceptor(list))
+```
+
+Suppressed recipients are removed from `To`, `Cc` and `Bcc`; if none remain the
+send fails with `ErrAllRecipientsSuppressed` and nothing is transmitted. The
+check **fails closed** — if the list cannot be reached the send fails, because
+an unreachable list is not evidence that an address is safe to mail. Set
+`SuppressionOptions.IgnoreErrors` to opt out.
+
+`MemorySuppressionList` is for tests and small deployments. Implement
+`Suppressor` over durable storage for anything else: a suppression list that
+forgets on restart re-sends to people who already complained.
+
+### One-click unsubscribe (RFC 8058)
+
+Gmail and Yahoo require this of bulk senders. It needs **both**
+`List-Unsubscribe` and `List-Unsubscribe-Post` — setting the first alone does
+not satisfy it.
+
+```go
+email.SetOneClickUnsubscribe("https://example.com/u?t=" + token)
+
+// refuse to send bulk mail that forgot them
+bulk := gsmail.WrapSender(sender, gsmail.RequireOneClickUnsubscribe())
+```
+
+The target must be https: one-click works by the provider POSTing to it, and
+the URL carries a token identifying the recipient. Your endpoint must accept a
+POST without asking the recipient to confirm, and must **not** act on a bare
+GET, or link-scanning security software will unsubscribe your recipients for
+them.
+
+### Composing senders
+
+```go
+// Try SES, fall back to SMTP. Permanent rejections are not retried elsewhere.
+sender := gsmail.FailoverSender(sesSender, smtpSender)
+
+// Pace sends to stay under a provider limit rather than reacting to a 429.
+sender = gsmail.RateLimitedSender(sender, gsmail.NewTokenBucket(time.Second/10, 20))
+
+// Fetch an OAuth token once instead of on every send and retry.
+smtpSender.UseOAuth(gsmail.AuthXOAUTH2, gsmail.CachingTokenSource(refresh, time.Minute))
+```
+
+### Working with a mailbox
+
+```go
+r := imap.NewReceiver("imap.example.com", 993, user, pass, true)
+r.Mailbox = "Archive"                      // defaults to INBOX
+
+emails, _ := r.Receive(ctx, 50)
+r.MarkSeen(ctx, imap.UIDsOf(emails)...)
+r.Move(ctx, "Processed", emails[0].UID)
+```
+
+POP3 has no server-side read state, so set `DeleteAfterRetrieve` if you want
+the next poll to see only new mail. It is off by default because deletion is
+irreversible.
+
+## Testing your own code
+
+`gsmailtest` records messages instead of sending them, so you can assert on
+what your application produced without a network or a provider account:
+
+```go
+sender := gsmailtest.NewSender()
+svc := NewSignupService(sender)
+
+svc.Welcome(ctx, "Alice <alice@example.com>")
+
+msg := sender.MustTo(t, "alice@example.com")   // matching ignores case and display names
+if msg.Subject != "Welcome" { ... }
+```
+
+`FailWith` and `FailNextWith` drive error and retry paths; `Receiver` with
+`Push` drives `Idle`.
+
+## Observability
+
+```go
+sender = gsmail.WrapSender(sender,
+    otelgs.SendInterceptor(),          // spans, no personal data
+    otelgs.SendMetricsInterceptor(),   // counts, durations, sizes
+)
+```
+
+Neither records addresses or subjects. Use `otelgs.VerboseSendInterceptor` if
+your retention and access controls allow it.
+
 ## Writing a provider
 
 If you implement `gsmail.Sender` — for another API, or for your own internal
