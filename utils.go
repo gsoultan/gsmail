@@ -55,14 +55,23 @@ var ErrPartTooLarge = errors.New("gsmail: mime part exceeds maximum size")
 // beyond maxMultipartDepth.
 var ErrTooDeeplyNested = errors.New("gsmail: mime message is nested too deeply")
 
+// htmlTag is a marker this package treats as evidence of HTML.
+//
+// heading marks <h, which must be followed by a digit: matching the bare
+// prefix classified "Temperature dropped <halfway>" as HTML.
+type htmlTag struct {
+	prefix  []byte
+	heading bool
+}
+
 var (
-	htmlTags = [][]byte{
-		[]byte("<html"),
-		[]byte("<body"),
-		[]byte("<div"),
-		[]byte("<p"),
-		[]byte("<!doctype"),
-		[]byte("<h"),
+	htmlTags = []htmlTag{
+		{prefix: []byte("<html")},
+		{prefix: []byte("<body")},
+		{prefix: []byte("<div")},
+		{prefix: []byte("<p")},
+		{prefix: []byte("<!doctype")},
+		{prefix: []byte("<h"), heading: true},
 	}
 
 	bufferPool = sync.Pool{
@@ -164,24 +173,49 @@ func IsHTML(b []byte) bool {
 	prefix := b[:searchLen]
 
 	for _, tag := range htmlTags {
-		if containsCaseInsensitive(prefix, tag) {
+		if containsTag(prefix, tag) {
 			return true
 		}
 	}
 	return false
 }
 
-func containsCaseInsensitive(b []byte, substr []byte) bool {
-	if len(substr) == 0 {
-		return true
-	}
-	if len(b) < len(substr) {
+// containsTag reports whether b holds tag as an actual tag rather than as an
+// incidental substring.
+//
+// Matching the bare prefix meant ordinary prose was classified as HTML:
+// "Please review <p1> pricing" matched "<p", and the message then went out as
+// text/html, where the recipient's renderer swallowed "<p1>" and the sentence
+// lost a word. Requiring a character that may legally follow a tag name --
+// and a digit after <h -- costs nothing and removes that whole class.
+func containsTag(b []byte, tag htmlTag) bool {
+	n := len(tag.prefix)
+	if n == 0 || len(b) < n {
 		return false
 	}
-	for i := 0; i <= len(b)-len(substr); i++ {
-		if matchAt(b, i, substr) {
+	for i := 0; i+n <= len(b); i++ {
+		if !matchAt(b, i, tag.prefix) {
+			continue
+		}
+		j := i + n
+		if tag.heading {
+			if j >= len(b) || b[j] < '1' || b[j] > '6' {
+				continue
+			}
+			j++
+		}
+		if j < len(b) && isTagTerminator(b[j]) {
 			return true
 		}
+	}
+	return false
+}
+
+// isTagTerminator reports whether c may follow a tag name.
+func isTagTerminator(c byte) bool {
+	switch c {
+	case '>', '/', ' ', '\t', '\r', '\n':
+		return true
 	}
 	return false
 }
