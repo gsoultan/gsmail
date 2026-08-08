@@ -3,9 +3,11 @@ package smtp
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/smtp"
+	"net/textproto"
 	"strconv"
 	"time"
 
@@ -211,7 +213,7 @@ func (p *Sender) EnablePool(config PoolConfig) {
 			}
 			if err := client.Auth(auth); err != nil {
 				_ = client.Close()
-				return nil, fmt.Errorf("smtp auth: %w", err)
+				return nil, classify(fmt.Errorf("smtp auth: %w", err))
 			}
 		}
 
@@ -253,6 +255,26 @@ func (p *Sender) Ping(ctx context.Context) error {
 	})
 }
 
+// classify marks a permanently failed SMTP command as non-retryable.
+//
+// The reply code is the protocol's own retry classification: RFC 5321 defines
+// 4xx as "transient, try again" and 5xx as "permanent, do not". Without this
+// every 550 was retried four times, which is not just wasted work -- repeated
+// deliveries to an address the receiver has already rejected are a
+// deliverability signal counted against the sender.
+//
+// This mirrors what HTTPError does for the API-backed providers.
+func classify(err error) error {
+	if err == nil {
+		return nil
+	}
+	var proto *textproto.Error
+	if errors.As(err, &proto) && proto.Code >= 500 && proto.Code < 600 {
+		return gsmail.NonRetryable(err)
+	}
+	return err
+}
+
 func (p *Sender) sendOnClient(client *smtp.Client, from string, to []string, msg []byte) error {
 	f, _ := gsmail.ParseEmailAddress(from)
 	if f != nil {
@@ -260,7 +282,7 @@ func (p *Sender) sendOnClient(client *smtp.Client, from string, to []string, msg
 	}
 
 	if err := client.Mail(from); err != nil {
-		return fmt.Errorf("smtp mail from: %w", err)
+		return classify(fmt.Errorf("smtp mail from: %w", err))
 	}
 
 	for _, t := range to {
@@ -269,7 +291,7 @@ func (p *Sender) sendOnClient(client *smtp.Client, from string, to []string, msg
 			rcpt = a.Address
 		}
 		if err := client.Rcpt(rcpt); err != nil {
-			return fmt.Errorf("smtp rcpt to %s: %w", t, err)
+			return classify(fmt.Errorf("smtp rcpt to %s: %w", t, err))
 		}
 	}
 
@@ -279,7 +301,7 @@ func (p *Sender) sendOnClient(client *smtp.Client, from string, to []string, msg
 func (p *Sender) writeData(client *smtp.Client, msg []byte) error {
 	w, err := client.Data()
 	if err != nil {
-		return fmt.Errorf("smtp data: %w", err)
+		return classify(fmt.Errorf("smtp data: %w", err))
 	}
 
 	if _, err = w.Write(msg); err != nil {
@@ -288,7 +310,7 @@ func (p *Sender) writeData(client *smtp.Client, msg []byte) error {
 	}
 
 	if err := w.Close(); err != nil {
-		return fmt.Errorf("close data writer: %w", err)
+		return classify(fmt.Errorf("close data writer: %w", err))
 	}
 
 	return nil
@@ -300,7 +322,7 @@ func (p *Sender) authenticateAndSend(client *smtp.Client, auth smtp.Auth, from s
 			return fmt.Errorf("smtp server does not support AUTH")
 		}
 		if err := client.Auth(auth); err != nil {
-			return fmt.Errorf("smtp auth: %w", err)
+			return classify(fmt.Errorf("smtp auth: %w", err))
 		}
 	}
 

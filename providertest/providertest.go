@@ -215,15 +215,26 @@ func testBasic(t *testing.T, h Harness) {
 	}
 }
 
-// Cc and Bcc are quietly dropped surprisingly often.
-func testRecipients(t *testing.T, h Harness) {
+// bccAddress is the Bcc recipient used by recipientEmail. Named so the
+// fixture and the assertions cannot drift apart.
+const bccAddress = "d@example.com"
+
+// recipientEmail exercises To, Cc and Bcc together.
+func recipientEmail() gsmail.Email {
 	e := basicEmail()
 	e.To = []string{"a@example.com", "b@example.com"}
 	e.Cc = []string{"c@example.com"}
-	e.Bcc = []string{"d@example.com"}
+	e.Bcc = []string{bccAddress}
+	return e
+}
 
-	got := h.capture(t, e)
+// Cc and Bcc are quietly dropped surprisingly often.
+func testRecipients(t *testing.T, h Harness) {
+	assertRecipients(t, h.capture(t, recipientEmail()))
+}
 
+func assertRecipients(t *testing.T, got Sent) {
+	t.Helper()
 	if len(got.To) > 0 && len(got.To) != 2 {
 		t.Errorf("To = %v, want 2 recipients", got.To)
 	}
@@ -241,12 +252,19 @@ func testRecipients(t *testing.T, h Harness) {
 // List-Unsubscribe is required of bulk senders by Gmail and Yahoo. Every
 // API-backed provider in this module dropped it at some point.
 func testCustomHeaders(t *testing.T, h Harness) {
+	assertCustomHeaders(t, h.capture(t, customHeaderEmail()))
+}
+
+// customHeaderEmail carries the headers a bulk sender cannot do without.
+func customHeaderEmail() gsmail.Email {
 	e := basicEmail()
 	e.SetHeader("List-Unsubscribe", "<https://x.test/u>")
 	e.SetHeader("X-Campaign", "spring")
+	return e
+}
 
-	got := h.capture(t, e)
-
+func assertCustomHeaders(t *testing.T, got Sent) {
+	t.Helper()
 	if got.Headers == nil {
 		t.Fatal("provider forwarded no custom headers; List-Unsubscribe is mandatory for bulk mail")
 	}
@@ -261,13 +279,20 @@ func testCustomHeaders(t *testing.T, h Harness) {
 // Headers the provider generates itself must not be duplicated or overridden
 // through Email.Headers.
 func testReservedHeaders(t *testing.T, h Harness) {
+	assertReservedHeaders(t, h.capture(t, reservedHeaderEmail()))
+}
+
+// reservedHeaderEmail tries to override headers the transport generates.
+func reservedHeaderEmail() gsmail.Email {
 	e := basicEmail()
 	e.SetHeader("Subject", "hijacked")
 	e.SetHeader("From", "attacker@evil.test")
 	e.SetHeader("X-Kept", "yes")
+	return e
+}
 
-	got := h.capture(t, e)
-
+func assertReservedHeaders(t *testing.T, got Sent) {
+	t.Helper()
 	for _, reserved := range []string{"Subject", "From", "To", "Cc", "Bcc"} {
 		if _, leaked := got.Headers[reserved]; leaked {
 			t.Errorf("reserved header %q was forwarded to the API", reserved)
@@ -309,14 +334,22 @@ func testIllegalHeaderName(t *testing.T, h Harness) {
 // it as a plain attachment leaves the image broken in the body and duplicated
 // at the bottom of the message.
 func testInlineAttachment(t *testing.T, h Harness) {
+	assertInlineAttachment(t, h.capture(t, inlineAttachmentEmail()))
+}
+
+// inlineAttachmentEmail pairs a cid:-referenced image with a plain attachment.
+func inlineAttachmentEmail() gsmail.Email {
 	e := basicEmail()
 	e.HTMLBody = []byte(`<img src="cid:logo">`)
 	e.Attachments = []gsmail.Attachment{
 		{Filename: "logo.png", ContentType: "image/png", ContentID: "logo", Data: []byte("x")},
 		{Filename: "doc.pdf", ContentType: "application/pdf", Data: []byte("y")},
 	}
+	return e
+}
 
-	got := h.capture(t, e)
+func assertInlineAttachment(t *testing.T, got Sent) {
+	t.Helper()
 	if len(got.Attachments) == 0 {
 		t.Skip("provider view does not expose attachments")
 	}
