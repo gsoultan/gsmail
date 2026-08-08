@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -15,25 +17,43 @@ import (
 	"net/smtp"
 	"net/textproto"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unsafe"
 )
 
-var (
-	emailRegex = regexp.MustCompile(`^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$`)
-	dialer     = &net.Dialer{
-		Timeout: 5 * time.Second,
-	}
-	smtpPort  = "25"
-	lookupMX  = net.DefaultResolver.LookupMX
-	lookupTXT = net.DefaultResolver.LookupTXT
-)
+var emailRegex = regexp.MustCompile(`^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$`)
 
 const (
-	maxBufferSize = 4096
+	// maxBufferSize bounds which pooled buffers are worth keeping. It has to
+	// exceed a realistic rendered message or the pool never recycles anything:
+	// at 4 KiB even a small HTML mail outgrew it, so every render allocated
+	// from scratch and the pool was doing no work at all. Buffers above this
+	// (large attachments) are dropped so a single big send does not pin
+	// megabytes per P for the life of the process.
+	maxBufferSize = 64 << 10
+
+	// initialBufferSize is the starting capacity of a fresh pooled buffer,
+	// chosen to cover the header block plus a small body without regrowing.
+	initialBufferSize = 4096
+
+	// maxPartSize bounds a single decoded MIME part when parsing an inbound
+	// message, so a hostile sender cannot exhaust memory.
+	maxPartSize = 25 << 20
+
+	// maxMultipartDepth bounds multipart nesting when parsing an inbound
+	// message, so a hostile sender cannot exhaust the stack.
+	maxMultipartDepth = 10
 )
+
+// ErrPartTooLarge is returned when a MIME part exceeds maxPartSize.
+var ErrPartTooLarge = errors.New("gsmail: mime part exceeds maximum size")
+
+// ErrTooDeeplyNested is returned when a message nests multipart containers
+// beyond maxMultipartDepth.
+var ErrTooDeeplyNested = errors.New("gsmail: mime message is nested too deeply")
 
 var (
 	htmlTags = [][]byte{
@@ -47,19 +67,19 @@ var (
 
 	bufferPool = sync.Pool{
 		New: func() any {
-			b := make([]byte, 0, 1024)
+			b := make([]byte, 0, initialBufferSize)
 			return &b
 		},
 	}
 )
 
-// GetBuffer retrieves a byte slice from the pool.
-func GetBuffer() *[]byte {
+// getBuffer retrieves a byte slice from the pool.
+func getBuffer() *[]byte {
 	return bufferPool.Get().(*[]byte)
 }
 
-// PutBuffer returns a byte slice to the pool if it's within the size limit.
-func PutBuffer(b *[]byte) {
+// putBuffer returns a byte slice to the pool if it's within the size limit.
+func putBuffer(b *[]byte) {
 	if b == nil {
 		return
 	}
@@ -69,18 +89,18 @@ func PutBuffer(b *[]byte) {
 	}
 }
 
-// NewBufferWriter creates a new BufferWriter for the given buffer.
-func NewBufferWriter(b *[]byte) *BufferWriter {
-	return &BufferWriter{bufPtr: b}
+// newBufferWriter creates a new bufferWriter for the given buffer.
+func newBufferWriter(b *[]byte) *bufferWriter {
+	return &bufferWriter{bufPtr: b}
 }
 
-// BufferWriter implements io.Writer for the pooled byte slices.
-type BufferWriter struct {
+// bufferWriter implements io.Writer for the pooled byte slices.
+type bufferWriter struct {
 	bufPtr *[]byte
 }
 
 // Write appends data to the underlying buffer.
-func (w *BufferWriter) Write(p []byte) (n int, err error) {
+func (w *bufferWriter) Write(p []byte) (n int, err error) {
 	*w.bufPtr = append(*w.bufPtr, p...)
 	return len(p), nil
 }
@@ -101,7 +121,7 @@ func HasHeader(b []byte, header string) bool {
 		headerEnd = len(b)
 	}
 
-	headerBytes := UnsafeStringToBytes(header)
+	headerBytes := unsafeStringToBytes(header)
 
 	// Check the first line
 	if isHeaderAt(b, 0, headerBytes) {
@@ -190,25 +210,27 @@ func matchAt(b []byte, pos int, substr []byte) bool {
 	return true
 }
 
-// UnsafeStringToBytes converts a string to a byte slice without allocation.
+// unsafeStringToBytes converts a string to a byte slice without allocation.
 // The caller must not modify the returned byte slice.
-func UnsafeStringToBytes(s string) []byte {
+func unsafeStringToBytes(s string) []byte {
 	if len(s) == 0 {
 		return nil
 	}
 	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
-// UnsafeBytesToString converts a byte slice to a string without allocation.
-func UnsafeBytesToString(b []byte) string {
+// unsafeBytesToString converts a byte slice to a string without allocation.
+func unsafeBytesToString(b []byte) string {
 	if len(b) == 0 {
 		return ""
 	}
 	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
-// Disposable domains set for spam prevention.
-var disposableDomainsSet = map[string]struct{}{
+// defaultDisposableDomains is the built-in set of throwaway mail providers.
+// It is deliberately small and will go stale; supply a maintained list through
+// Validator.DisposableDomains instead of relying on it in production.
+var defaultDisposableDomains = map[string]struct{}{
 	"10minutemail.com":   {},
 	"tempmail.org":       {},
 	"guerrillamail.com":  {},
@@ -238,18 +260,33 @@ var disposableDomainsSet = map[string]struct{}{
 	"teleworm.us":        {},
 }
 
-func isDisposableDomain(domain string) bool {
-	d := strings.ToLower(domain)
-	_, exists := disposableDomainsSet[d]
+// DefaultDisposableDomains returns a copy of the built-in disposable domain
+// set, so callers can extend it without mutating package state.
+func DefaultDisposableDomains() map[string]struct{} {
+	out := make(map[string]struct{}, len(defaultDisposableDomains))
+	for d := range defaultDisposableDomains {
+		out[d] = struct{}{}
+	}
+	return out
+}
+
+func isDisposableDomain(domain string, set map[string]struct{}) bool {
+	if set == nil {
+		set = defaultDisposableDomains
+	}
+	_, exists := set[strings.ToLower(domain)]
 	return exists
 }
 
+// IsDisposableEmail reports whether the address belongs to a known throwaway
+// provider from the built-in list. Use Validator.DisposableDomains to supply
+// your own list.
 func IsDisposableEmail(email string) bool {
 	i := strings.LastIndexByte(email, '@')
 	if i < 1 || i >= len(email)-1 {
 		return false
 	}
-	return isDisposableDomain(email[i+1:])
+	return isDisposableDomain(email[i+1:], nil)
 }
 
 // IsValidEmail checks if the given string is a valid email address.
@@ -261,47 +298,143 @@ func IsValidEmail(email string) bool {
 	return emailRegex.MatchString(strings.ToLower(email))
 }
 
-// ValidateEmailExistence checks if the email address actually exists.
-// It performs an MX lookup and attempts an SMTP handshake.
-func ValidateEmailExistence(ctx context.Context, email string) error {
+// Validation errors. They are all non-retryable: retrying will not change the
+// verdict for a malformed or disallowed address.
+var (
+	ErrInvalidEmailFormat = errors.New("gsmail: invalid email format")
+	ErrDisposableEmail    = errors.New("gsmail: disposable/temporary email address not allowed")
+	ErrNoMXRecords        = errors.New("gsmail: no MX records found for domain")
+)
+
+// Resolver abstracts the DNS lookups used for validation and domain health
+// checks. *net.Resolver satisfies this interface.
+type Resolver interface {
+	LookupMX(ctx context.Context, name string) ([]*net.MX, error)
+	LookupTXT(ctx context.Context, name string) ([]string, error)
+}
+
+// Validator validates email addresses.
+//
+// The zero value is ready to use and performs offline checks only: syntax and
+// the disposable-domain list. Network checks are opt-in.
+//
+// CheckMailbox performs an SMTP RCPT probe ("callback verification") against
+// the recipient's MX host. Enable it only if you understand the trade-offs:
+// outbound port 25 is blocked by most cloud providers, many operators treat
+// probing as abuse and will greylist or blocklist the source, and catch-all
+// domains accept every recipient, so a "valid" result means nothing.
+type Validator struct {
+	// CheckMX enables an MX record lookup for the address domain.
+	CheckMX bool
+
+	// CheckMailbox enables the SMTP RCPT probe. It implies CheckMX.
+	CheckMailbox bool
+
+	// AllowDisposable disables the disposable-domain rejection.
+	AllowDisposable bool
+
+	// DisposableDomains overrides the built-in disposable domain set.
+	// Keys must be lowercase.
+	DisposableDomains map[string]struct{}
+
+	// Resolver performs DNS lookups. Defaults to net.DefaultResolver.
+	Resolver Resolver
+
+	// Dialer dials the MX host for the RCPT probe. Defaults to a dialer with
+	// a five second timeout.
+	Dialer *net.Dialer
+
+	// SMTPPort is the port used for the RCPT probe. Defaults to "25".
+	SMTPPort string
+
+	// HeloName is sent in the EHLO/HELO command. Defaults to "localhost".
+	HeloName string
+
+	// MailFrom is the reverse path used for the probe. Defaults to the null
+	// reverse path ("<>"), which is the conventional choice for probes.
+	MailFrom string
+}
+
+func (v *Validator) resolver() Resolver {
+	if v.Resolver != nil {
+		return v.Resolver
+	}
+	return net.DefaultResolver
+}
+
+func (v *Validator) dialer() *net.Dialer {
+	if v.Dialer != nil {
+		return v.Dialer
+	}
+	return &net.Dialer{Timeout: 5 * time.Second}
+}
+
+func (v *Validator) port() string {
+	if v.SMTPPort != "" {
+		return v.SMTPPort
+	}
+	return "25"
+}
+
+func (v *Validator) helo() string {
+	if v.HeloName != "" {
+		return v.HeloName
+	}
+	return "localhost"
+}
+
+// Validate checks the address according to the validator's configuration.
+func (v *Validator) Validate(ctx context.Context, email string) error {
 	if !IsValidEmail(email) {
-		return fmt.Errorf("invalid email format")
+		return NonRetryable(ErrInvalidEmailFormat)
 	}
 
-	if IsDisposableEmail(email) {
-		return fmt.Errorf("disposable/temporary email address not allowed")
+	i := strings.LastIndexByte(email, '@')
+	domain := email[i+1:]
+
+	if !v.AllowDisposable && isDisposableDomain(domain, v.DisposableDomains) {
+		return NonRetryable(ErrDisposableEmail)
 	}
 
-	parts := strings.Split(email, "@")
-	domain := parts[1]
+	if !v.CheckMX && !v.CheckMailbox {
+		return nil
+	}
 
-	mxs, err := lookupMX(ctx, domain)
+	mxs, err := v.resolver().LookupMX(ctx, domain)
 	if err != nil {
-		return fmt.Errorf("lookup mx: %w", err)
+		return fmt.Errorf("lookup mx for %q: %w", domain, err)
 	}
 	if len(mxs) == 0 {
-		return fmt.Errorf("no mx records found for domain %s", domain)
+		return NonRetryable(fmt.Errorf("%w: %s", ErrNoMXRecords, domain))
+	}
+
+	if !v.CheckMailbox {
+		return nil
 	}
 
 	var lastErr error
 	for _, mx := range mxs {
-		addr := net.JoinHostPort(mx.Host, smtpPort)
-		if err := verifyExistence(ctx, addr, email); err == nil {
+		addr := net.JoinHostPort(mx.Host, v.port())
+		if err := v.probe(ctx, addr, email); err == nil {
 			return nil
 		} else {
 			lastErr = err
 		}
 	}
 
-	return fmt.Errorf("could not verify email existence: %w", lastErr)
+	return fmt.Errorf("could not verify mailbox %q: %w", email, lastErr)
 }
 
-func verifyExistence(ctx context.Context, addr, email string) error {
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+func (v *Validator) probe(ctx context.Context, addr, email string) error {
+	conn, err := v.dialer().DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
 
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -314,8 +447,8 @@ func verifyExistence(ctx context.Context, addr, email string) error {
 	defer client.Close()
 
 	commands := []func() error{
-		func() error { return client.Hello("localhost") },
-		func() error { return client.Mail("verify@example.com") },
+		func() error { return client.Hello(v.helo()) },
+		func() error { return client.Mail(v.MailFrom) },
 		func() error { return client.Rcpt(email) },
 	}
 
@@ -327,6 +460,23 @@ func verifyExistence(ctx context.Context, addr, email string) error {
 
 	_ = client.Quit()
 	return nil
+}
+
+// ValidateEmailExistence checks whether the mailbox appears to exist by doing
+// an MX lookup followed by an SMTP RCPT probe.
+//
+// Deprecated: use Validator directly. Callback verification is unreliable and
+// can get the sending host blocklisted; see Validator.CheckMailbox.
+func ValidateEmailExistence(ctx context.Context, email string) error {
+	v := Validator{CheckMX: true, CheckMailbox: true}
+	return v.Validate(ctx, email)
+}
+
+// ValidateEmailSyntax performs the offline checks only: syntax and the
+// built-in disposable domain list. It never touches the network.
+func ValidateEmailSyntax(email string) error {
+	var v Validator
+	return v.Validate(context.Background(), email)
 }
 
 func ParseRawEmail(raw []byte) (Email, error) {
@@ -363,7 +513,7 @@ func ParseRawEmail(raw []byte) (Email, error) {
 	}
 
 	if strings.HasPrefix(mediaType, "multipart/") {
-		err = parseMultipart(&email, msg.Body, params["boundary"])
+		err = parseMultipart(&email, msg.Body, params["boundary"], 0)
 	} else {
 		email.Body, err = decodePart(msg.Body, msg.Header.Get("Content-Transfer-Encoding"))
 	}
@@ -371,21 +521,60 @@ func ParseRawEmail(raw []byte) (Email, error) {
 	return email, err
 }
 
+// parseAddressList splits an address header into individual addresses.
+// It uses the RFC 5322 parser so that quoted display names containing commas
+// (for example `"Doe, John" <j@example.com>`) are not split apart.
 func parseAddressList(s string) []string {
-	parts := strings.Split(s, ",")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
+	if addrs, err := mail.ParseAddressList(s); err == nil {
+		out := make([]string, 0, len(addrs))
+		for _, a := range addrs {
+			if a.Name == "" {
+				out = append(out, a.Address)
+				continue
+			}
+			out = append(out, a.String())
+		}
+		return out
 	}
-	return parts
+
+	// Fall back to a naive split for malformed headers, but never emit empties.
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func parseFallbackBody(email Email, r io.Reader) Email {
-	body, _ := io.ReadAll(r)
+	body, _ := readLimited(r)
 	email.Body = body
 	return email
 }
 
-func parseMultipart(email *Email, r io.Reader, boundary string) error {
+// readLimited reads at most maxPartSize bytes and reports ErrPartTooLarge if
+// the source has more to give.
+func readLimited(r io.Reader) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxPartSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxPartSize {
+		return nil, ErrPartTooLarge
+	}
+	return b, nil
+}
+
+func parseMultipart(email *Email, r io.Reader, boundary string, depth int) error {
+	if depth >= maxMultipartDepth {
+		return ErrTooDeeplyNested
+	}
+	if boundary == "" {
+		return fmt.Errorf("multipart content type without boundary")
+	}
+
 	mr := multipart.NewReader(r, boundary)
 	for {
 		part, err := mr.NextPart()
@@ -396,21 +585,23 @@ func parseMultipart(email *Email, r io.Reader, boundary string) error {
 			return err
 		}
 
-		if err := processPart(email, part); err != nil {
+		err = processPart(email, part, depth)
+		_ = part.Close()
+		if err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func processPart(email *Email, part *multipart.Part) error {
+func processPart(email *Email, part *multipart.Part, depth int) error {
 	contentType := part.Header.Get("Content-Type")
 	mediaType, params, _ := mime.ParseMediaType(contentType)
 	disposition, dispParams, _ := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
 	contentID := strings.Trim(part.Header.Get("Content-ID"), "<>")
 
 	if strings.HasPrefix(mediaType, "multipart/") {
-		return parseMultipart(email, part, params["boundary"])
+		return parseMultipart(email, part, params["boundary"], depth+1)
 	}
 
 	data, err := decodePart(part, part.Header.Get("Content-Transfer-Encoding"))
@@ -455,28 +646,100 @@ func processPart(email *Email, part *multipart.Part) error {
 }
 
 func decodePart(r io.Reader, encoding string) ([]byte, error) {
-	var decoder io.Reader = r
-	switch strings.ToLower(encoding) {
+	// Bound the *encoded* stream too: base64 and quoted-printable both expand,
+	// so limiting only the decoded output would still let a small hostile
+	// message force a large read.
+	var decoder io.Reader = io.LimitReader(r, 2*maxPartSize)
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "base64":
-		decoder = base64.NewDecoder(base64.StdEncoding, r)
+		decoder = base64.NewDecoder(base64.StdEncoding, decoder)
 	case "quoted-printable":
-		decoder = quotedprintable.NewReader(r)
+		decoder = quotedprintable.NewReader(decoder)
 	}
 
-	return io.ReadAll(decoder)
+	return readLimited(decoder)
+}
+
+// messageIDDomain extracts the right-hand side of the From address for use in
+// a generated Message-ID.
+//
+// It scans for the domain rather than calling mail.ParseAddress, which would
+// re-parse the very same From that FormatAddress already parsed. RFC 5322
+// address parsing is the largest single allocation source in rendering a
+// message, and doing it twice for one field bought nothing. The result is
+// validated below, so a malformed or hostile From can only yield a safe
+// domain or the fallback.
+func messageIDDomain(from string) string {
+	const fallback = "gsmail.local"
+
+	s := strings.TrimSpace(from)
+
+	// Prefer the angle-addr when the value is "Display Name <a@b.test>", so a
+	// display name containing an @ cannot supply the domain.
+	if i := strings.LastIndexByte(s, '<'); i >= 0 {
+		j := strings.IndexByte(s[i:], '>')
+		if j <= 1 {
+			return fallback
+		}
+		s = s[i+1 : i+j]
+	} else if strings.ContainsFunc(s, isAddrSeparator) {
+		// With no angle-addr this must be a bare addr-spec. Anything carrying
+		// whitespace or a control character is not one, and scanning it for
+		// the last @ would happily read a domain out of text that follows a
+		// header break -- "a@good.test\r\nBcc: x@evil.test" would yield
+		// evil.test. Refuse the whole value instead.
+		return fallback
+	}
+
+	i := strings.LastIndexByte(s, '@')
+	if i < 0 || i == len(s)-1 {
+		return fallback
+	}
+	if !isSafeMessageIDDomain(s[i+1:]) {
+		return fallback
+	}
+	return s[i+1:]
+}
+
+// isAddrSeparator reports whether r cannot appear inside a bare addr-spec.
+func isAddrSeparator(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\r' || r == '\n' || r < 0x20 || r == 0x7f
+}
+
+// isSafeMessageIDDomain reports whether domain may be placed inside a
+// Message-ID unescaped. Anything outside the LDH set is rejected outright, so
+// no separator, control character or header break can reach the wire.
+func isSafeMessageIDDomain(domain string) bool {
+	if domain == "" || len(domain) > 255 {
+		return false
+	}
+	for i := 0; i < len(domain); i++ {
+		c := domain[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func generateMessageID(from string) string {
-	domain := "gsmail.local"
-	if a, err := mail.ParseAddress(from); err == nil {
-		parts := strings.Split(a.Address, "@")
-		if len(parts) > 1 {
-			domain = parts[1]
-		}
-	}
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("<%x@%s>", b, domain)
+	domain := messageIDDomain(from)
+
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+
+	// Assembled by hand rather than with fmt.Sprintf, which showed up in the
+	// allocation profile of every rendered message.
+	out := make([]byte, 0, 1+32+1+len(domain)+1)
+	out = append(out, '<')
+	out = hex.AppendEncode(out, b[:])
+	out = append(out, '@')
+	out = append(out, domain...)
+	out = append(out, '>')
+	return unsafeBytesToString(out)
 }
 
 // FormatAddresses formats a list of addresses into a single string for headers.
@@ -485,16 +748,27 @@ func FormatAddresses(addresses []string) string {
 }
 
 // FormatAddressList formats a list of addresses into a slice of strings.
+// Entries that are empty or that contain a line break are dropped: such a
+// value cannot be represented in a single header field and is almost always a
+// header-injection attempt.
 func FormatAddressList(addresses []string) []string {
 	formatted := make([]string, 0, len(addresses))
 	for _, addr := range addresses {
-		formatted = append(formatted, FormatAddress(addr))
+		if f := FormatAddress(addr); f != "" {
+			formatted = append(formatted, f)
+		}
 	}
 	return formatted
 }
 
-// FormatAddress ensures an email address is properly formatted (e.g., quotes names with special characters).
+// FormatAddress ensures an email address is properly formatted (e.g., quotes
+// names with special characters). It returns "" for an address containing CR
+// or LF, so that untrusted input cannot inject additional headers.
 func FormatAddress(s string) string {
+	if strings.ContainsAny(s, "\r\n") {
+		return ""
+	}
+	s = sanitizeHeaderValue(s)
 	if a, err := ParseEmailAddress(s); err == nil && a != nil {
 		if a.Name == "" {
 			return a.Address
@@ -532,15 +806,218 @@ func ParseEmailAddress(s string) (*mail.Address, error) {
 	return nil, err
 }
 
+// SanitizeHeaderValue strips every character that must not appear in an
+// RFC 5322 header field value: CR, LF, the remaining C0 controls and DEL.
+// Apply it to any untrusted string before putting it into a header.
+func SanitizeHeaderValue(s string) string {
+	return sanitizeHeaderValue(s)
+}
+
+func sanitizeHeaderValue(s string) string {
+	if !strings.ContainsFunc(s, isIllegalHeaderRune) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if isIllegalHeaderRune(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func isIllegalHeaderRune(r rune) bool {
+	return (r < 0x20 && r != '\t') || r == 0x7f
+}
+
+// encodeHeader prepares an arbitrary string for use as a header field value.
+// The value is sanitised first, so control characters can never reach the
+// wire, and is then RFC 2047 encoded whenever it is not plain printable ASCII.
 func encodeHeader(s string) string {
-	// Only encode if contains non-ASCII characters
-	for i := range len(s) {
-		if s[i] > 127 {
+	s = sanitizeHeaderValue(s)
+	if s == "" {
+		return ""
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c > 0x7e {
 			return mime.QEncoding.Encode("UTF-8", s)
 		}
 	}
 	return s
 }
+
+// reservedHeaders are produced by BuildMessage itself. Supplying them through
+// Email.Headers would duplicate or corrupt the generated message.
+var reservedHeaders = map[string]struct{}{
+	"from":                      {},
+	"to":                        {},
+	"cc":                        {},
+	"bcc":                       {},
+	"reply-to":                  {},
+	"subject":                   {},
+	"mime-version":              {},
+	"content-type":              {},
+	"content-transfer-encoding": {},
+}
+
+// CustomHeaders returns the caller-supplied headers a provider may pass to its
+// own API, with reserved names dropped, names validated and values sanitised
+// and RFC 2047 encoded.
+//
+// Providers that construct a message through a vendor API instead of through
+// BuildMessage use this so Email.Headers means the same thing on every
+// transport. Without it, List-Unsubscribe — which Gmail and Yahoo require from
+// bulk senders — is silently lost on the API providers while working fine over
+// SMTP.
+//
+// It reports the same error BuildMessage would for an illegal header name,
+// rather than quietly skipping it, so a mistake surfaces on every transport.
+func CustomHeaders(h map[string]string) (map[string]string, error) {
+	if len(h) == 0 {
+		return nil, nil
+	}
+
+	out := make(map[string]string, len(h))
+	for _, name := range sortedHeaderNames(h) {
+		if _, reserved := reservedHeaders[strings.ToLower(name)]; reserved {
+			continue
+		}
+		if !isValidHeaderName(name) {
+			return nil, NonRetryable(fmt.Errorf("gsmail: invalid header name %q", name))
+		}
+		if v := encodeHeader(h[name]); v != "" {
+			out[name] = v
+		}
+	}
+
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// isValidHeaderName reports whether name is a legal RFC 5322 field name.
+func isValidHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c <= ' ' || c >= 0x7f || c == ':' {
+			return false
+		}
+	}
+	return true
+}
+
+// formatDisposition builds a Content-Disposition value.
+//
+// The file name is always emitted as a quoted ASCII string, and a RFC 2231
+// (RFC 5987) extended form is appended when the name is not plain ASCII.
+// mime.FormatMediaType is deliberately not used here: it emits a bare token
+// for simple names ("filename=image.png") and *only* the extended form for
+// non-ASCII ones. Several clients, older Outlook in particular, mishandle both
+// and fall back to "ATT00001.dat", so we always give them a quoted name they
+// understand and let capable clients pick up filename* instead.
+func formatDisposition(kind, filename string) string {
+	filename = sanitizeHeaderValue(filename)
+	if filename == "" {
+		return kind
+	}
+
+	var b strings.Builder
+	b.WriteString(kind)
+	b.WriteString(`; filename="`)
+	b.WriteString(quoteFilename(asciiFilename(filename)))
+	b.WriteByte('"')
+
+	if !isPlainASCII(filename) {
+		b.WriteString("; filename*=utf-8''")
+		b.WriteString(rfc2231Escape(filename))
+	}
+	return b.String()
+}
+
+// isPlainASCII reports whether s consists only of printable ASCII.
+func isPlainASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// asciiFilename replaces every non-printable-ASCII rune with an underscore so
+// the quoted fallback is representable in a plain header.
+func asciiFilename(s string) string {
+	if isPlainASCII(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r < 0x20 || r > 0x7e {
+			b.WriteByte('_')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// quoteFilename escapes the two characters that may not appear unescaped
+// inside an RFC 5322 quoted-string.
+func quoteFilename(s string) string {
+	if !strings.ContainsAny(s, `"\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 4)
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c == '"' || c == '\\' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// rfc2231Escape percent-encodes s for use in an extended parameter value,
+// leaving only the attr-char set of RFC 5987 untouched.
+func rfc2231Escape(s string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if isAttrChar(c) {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&0x0f])
+	}
+	return b.String()
+}
+
+// isAttrChar reports whether c is an RFC 5987 attr-char.
+func isAttrChar(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	return strings.IndexByte("!#$&+-.^_`|~", c) >= 0
+}
+
+// crlf is shared rather than built inline. The line break is emitted once per
+// 76 base64 characters, and `[]byte("\r\n")` inside that loop escapes into the
+// io.Writer call and heap-allocates every time: it was the single largest
+// source of allocations when rendering a message.
+var crlf = []byte("\r\n")
 
 type base64MIMEWriter struct {
 	w   io.Writer
@@ -552,7 +1029,7 @@ func (w *base64MIMEWriter) Write(p []byte) (int, error) {
 
 	for len(p) > 0 {
 		if w.col == 76 {
-			if _, err := w.w.Write([]byte("\r\n")); err != nil {
+			if _, err := w.w.Write(crlf); err != nil {
 				return written, err
 			}
 			w.col = 0
@@ -585,32 +1062,91 @@ func writeMIMEBase64(w io.Writer, b []byte) error {
 	return enc.Close()
 }
 
-// BuildMessage builds the full RFC822 email message into the provided buffer.
-func BuildMessage(bufPtr *[]byte, email Email) {
-	writer := NewBufferWriter(bufPtr)
+// ErrConflictingContentType is returned by BuildMessage when the caller has
+// already written a Content-Type header but the message needs a multipart
+// container. Emitting the body anyway would produce an unparseable message.
+var ErrConflictingContentType = errors.New("gsmail: Content-Type already set but a multipart body is required")
+
+// RenderMessage renders email as a complete RFC 5322 message.
+//
+// Every header value is sanitised: CR and LF are stripped, non-ASCII text is
+// RFC 2047 encoded and attachment file names are encoded per RFC 2231, so a
+// subject, recipient or file name coming from untrusted input cannot inject
+// additional headers.
+func RenderMessage(email Email) ([]byte, error) {
+	buf := make([]byte, 0, 4096)
+	if err := BuildMessage(&buf, email); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+// WithMessage renders email into a pooled buffer and calls fn with the result.
+// The slice passed to fn is only valid until fn returns; copy it if you need
+// to keep it. Prefer this over RenderMessage on hot paths.
+func WithMessage(email Email, fn func(msg []byte) error) error {
+	bufPtr := getBuffer()
+	defer putBuffer(bufPtr)
+
+	if err := BuildMessage(bufPtr, email); err != nil {
+		return err
+	}
+	return fn(*bufPtr)
+}
+
+// BuildMessage builds the full RFC 5322 email message into the provided
+// buffer. See RenderMessage for the sanitisation guarantees.
+func BuildMessage(bufPtr *[]byte, email Email) error {
+	writer := newBufferWriter(bufPtr)
+	var werr error
+
+	// Whatever the caller already had in the buffer. RenderMessage and
+	// WithMessage both start from empty, so this is normally zero and every
+	// prefix check below short-circuits.
+	//
+	// writeHeader used to call HasHeader against the *whole growing buffer* on
+	// every single header, which made header emission quadratic: 64 custom
+	// headers cost 12x a bare message. Only the caller's prefix can hold a
+	// header we did not write ourselves, so that is all we scan; duplicates of
+	// our own output are tracked with the flags below.
+	prefixLen := len(*bufPtr)
+	hasPrefixHeader := func(key string) bool {
+		if prefixLen == 0 {
+			return false
+		}
+		return HasHeader((*bufPtr)[:prefixLen], key)
+	}
+
 	write := func(s string) {
-		_, _ = writer.Write(UnsafeStringToBytes(s))
+		if werr != nil {
+			return
+		}
+		_, werr = writer.Write(unsafeStringToBytes(s))
 	}
 
 	writeHeader := func(key, value string) {
-		if value != "" && !HasHeader(*bufPtr, key) {
-			write(key)
-			write(": ")
-			write(value)
-			write("\r\n")
+		if value == "" || hasPrefixHeader(key) {
+			return
 		}
+		write(key)
+		write(": ")
+		write(value)
+		write("\r\n")
 	}
 
 	// Basic headers
 	writeHeader("From", FormatAddress(email.From))
 
-	if !HasHeader(*bufPtr, "To") && len(email.To) > 0 {
+	if len(email.To) > 0 {
 		writeHeader("To", FormatAddresses(email.To))
 	}
 
 	if len(email.Cc) > 0 {
 		writeHeader("Cc", FormatAddresses(email.Cc))
 	}
+
+	// Bcc is deliberately never written: recipients are carried in the
+	// envelope only, so they stay hidden from every recipient.
 
 	if email.ReplyTo != "" {
 		writeHeader("Reply-To", FormatAddresses([]string{email.ReplyTo}))
@@ -619,12 +1155,36 @@ func BuildMessage(bufPtr *[]byte, email Email) {
 	writeHeader("Subject", encodeHeader(email.Subject))
 	writeHeader("MIME-Version", "1.0")
 
-	if !HasHeader(*bufPtr, "Date") {
+	// Date and Message-ID are generated here but are not in reservedHeaders,
+	// so a caller may also supply them through Email.Headers. Track what we
+	// emitted so the loop below does not append a second copy.
+	var wroteDate, wroteMessageID bool
+	if !hasPrefixHeader("Date") {
 		writeHeader("Date", time.Now().Format(time.RFC1123Z))
+		wroteDate = true
 	}
 
-	if !HasHeader(*bufPtr, "Message-ID") {
+	if !hasPrefixHeader("Message-ID") {
 		writeHeader("Message-ID", generateMessageID(email.From))
+		wroteMessageID = true
+	}
+
+	// Caller supplied headers (List-Unsubscribe, In-Reply-To, X-*, ...).
+	for _, name := range sortedHeaderNames(email.Headers) {
+		lower := strings.ToLower(name)
+		if _, reserved := reservedHeaders[lower]; reserved {
+			continue
+		}
+		if (lower == "date" && wroteDate) || (lower == "message-id" && wroteMessageID) {
+			continue
+		}
+		if !isValidHeaderName(name) {
+			// Permanent: the name will not become legal on a retry. Marked
+			// explicitly so the SMTP and SES paths agree with CustomHeaders,
+			// which the API-backed providers use.
+			return NonRetryable(fmt.Errorf("gsmail: invalid header name %q", name))
+		}
+		writeHeader(name, encodeHeader(email.Headers[name]))
 	}
 
 	hasAttachments := len(email.Attachments) > 0
@@ -640,7 +1200,7 @@ func BuildMessage(bufPtr *[]byte, email Email) {
 
 	if !hasAttachments && !hasBothBodies {
 		// Simple message - use base64 encoding so Unicode (emoji, etc.) is preserved through transport and Outlook
-		if !HasHeader(*bufPtr, "Content-Type") {
+		if !hasPrefixHeader("Content-Type") {
 			if isHTML {
 				write(HeaderHTML)
 			} else {
@@ -648,100 +1208,146 @@ func BuildMessage(bufPtr *[]byte, email Email) {
 			}
 			write("\r\n")
 		}
-		if !HasHeader(*bufPtr, "Content-Transfer-Encoding") {
+		if !hasPrefixHeader("Content-Transfer-Encoding") {
 			write("Content-Transfer-Encoding: base64\r\n")
 		}
 		write("\r\n")
-		_ = writeMIMEBase64(writer, mainBody)
+		if werr != nil {
+			return werr
+		}
+		if err := writeMIMEBase64(writer, mainBody); err != nil {
+			return err
+		}
 		write("\r\n")
-		return
+		return werr
 	}
 
-	var mw *multipart.Writer
+	// A multipart body needs the boundary we are about to generate. If the
+	// caller already pinned a Content-Type we cannot express that, and writing
+	// the parts anyway would yield an unparseable message.
+	if hasPrefixHeader("Content-Type") {
+		// Also permanent: the caller pinned a Content-Type that cannot
+		// coexist with the multipart body this message needs.
+		return NonRetryable(ErrConflictingContentType)
+	}
 
+	mw := multipart.NewWriter(writer)
 	if hasAttachments {
-		mw = multipart.NewWriter(writer)
 		writeHeader("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
-		write("\r\n")
-	} else if hasBothBodies {
-		mw = multipart.NewWriter(writer)
+	} else {
 		writeHeader("Content-Type", "multipart/alternative; boundary="+mw.Boundary())
-		write("\r\n")
+	}
+	write("\r\n")
+	if werr != nil {
+		return werr
 	}
 
 	// Write bodies
 	if hasBothBodies {
-		var amw *multipart.Writer
+		amw := mw
 		if hasAttachments {
 			// multipart/alternative inside multipart/mixed
 			altHeader := make(textproto.MIMEHeader)
 			// We need a new boundary for the alternative part
-			tempMw := multipart.NewWriter(io.Discard)
-			altBoundary := tempMw.Boundary()
+			altBoundary := multipart.NewWriter(io.Discard).Boundary()
 			altHeader.Set("Content-Type", "multipart/alternative; boundary="+altBoundary)
-			part, _ := mw.CreatePart(altHeader)
+			part, err := mw.CreatePart(altHeader)
+			if err != nil {
+				return err
+			}
 			amw = multipart.NewWriter(part)
-			amw.SetBoundary(altBoundary)
-		} else {
-			amw = mw
+			if err := amw.SetBoundary(altBoundary); err != nil {
+				return err
+			}
 		}
 
-		// Plain text part
-		textHeader := make(textproto.MIMEHeader)
-		textHeader.Set("Content-Type", "text/plain; charset=\"UTF-8\"")
-		textHeader.Set("Content-Transfer-Encoding", "base64")
-		textPart, _ := amw.CreatePart(textHeader)
-		_ = writeMIMEBase64(textPart, email.Body)
-
-		// HTML part
-		htmlHeader := make(textproto.MIMEHeader)
-		htmlHeader.Set("Content-Type", "text/html; charset=\"UTF-8\"")
-		htmlHeader.Set("Content-Transfer-Encoding", "base64")
-		htmlPart, _ := amw.CreatePart(htmlHeader)
-		_ = writeMIMEBase64(htmlPart, email.HTMLBody)
+		if err := writeBodyPart(amw, "text/plain", email.Body); err != nil {
+			return err
+		}
+		if err := writeBodyPart(amw, "text/html", email.HTMLBody); err != nil {
+			return err
+		}
 
 		if hasAttachments {
-			_ = amw.Close()
+			if err := amw.Close(); err != nil {
+				return err
+			}
 		}
 	} else {
-		// Single body (either plain or HTML)
-		header := make(textproto.MIMEHeader)
-		contentType := "text/plain; charset=\"UTF-8\""
+		contentType := "text/plain"
 		if isHTML {
-			contentType = "text/html; charset=\"UTF-8\""
+			contentType = "text/html"
 		}
-		header.Set("Content-Type", contentType)
-		header.Set("Content-Transfer-Encoding", "base64")
-
-		part, _ := mw.CreatePart(header)
-		_ = writeMIMEBase64(part, mainBody)
+		if err := writeBodyPart(mw, contentType, mainBody); err != nil {
+			return err
+		}
 	}
 
 	// Attachments
-	if hasAttachments {
-		for _, att := range email.Attachments {
-			attHeader := make(textproto.MIMEHeader)
-			attContentType := att.ContentType
-			if attContentType == "" {
-				attContentType = "application/octet-stream"
-			}
-			attHeader.Set("Content-Type", attContentType)
-			attHeader.Set("Content-Transfer-Encoding", "base64")
-
-			disposition := fmt.Sprintf("attachment; filename=\"%s\"", att.Filename)
-			if att.ContentID != "" {
-				attHeader.Set("Content-ID", "<"+att.ContentID+">")
-				disposition = fmt.Sprintf("inline; filename=\"%s\"", att.Filename)
-			}
-			attHeader.Set("Content-Disposition", disposition)
-
-			part, _ := mw.CreatePart(attHeader)
-			_ = writeMIMEBase64(part, att.Data)
+	for _, att := range email.Attachments {
+		if err := writeAttachmentPart(mw, att); err != nil {
+			return err
 		}
 	}
 
-	if mw != nil {
-		_ = mw.Close()
+	if err := mw.Close(); err != nil {
+		return err
 	}
 	write("\r\n")
+	return werr
+}
+
+func writeBodyPart(mw *multipart.Writer, mediaType string, body []byte) error {
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Type", mediaType+"; charset=\"UTF-8\"")
+	header.Set("Content-Transfer-Encoding", "base64")
+
+	part, err := mw.CreatePart(header)
+	if err != nil {
+		return err
+	}
+	return writeMIMEBase64(part, body)
+}
+
+func writeAttachmentPart(mw *multipart.Writer, att Attachment) error {
+	header := make(textproto.MIMEHeader)
+
+	contentType := sanitizeHeaderValue(att.ContentType)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	header.Set("Content-Type", contentType)
+	header.Set("Content-Transfer-Encoding", "base64")
+
+	kind := "attachment"
+	if att.ContentID != "" {
+		// Assigned directly rather than through Set, which canonicalises the
+		// key to "Content-Id". Both are legal — header names are
+		// case-insensitive — but "Content-ID" is the spelling every example
+		// and every other mailer uses, and some older clients match on it
+		// literally when resolving cid: references.
+		header["Content-ID"] = []string{"<" + sanitizeHeaderValue(att.ContentID) + ">"}
+		kind = "inline"
+	}
+	header.Set("Content-Disposition", formatDisposition(kind, att.Filename))
+
+	part, err := mw.CreatePart(header)
+	if err != nil {
+		return err
+	}
+	return writeMIMEBase64(part, att.Data)
+}
+
+// sortedHeaderNames returns the map keys in a stable order so that rendering
+// the same Email twice produces byte-identical output (important for DKIM).
+func sortedHeaderNames(h map[string]string) []string {
+	if len(h) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(h))
+	for name := range h {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

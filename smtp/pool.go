@@ -124,14 +124,34 @@ func (p *Pool) Get(ctx context.Context) (*smtp.Client, error) {
 			select {
 			case <-ctx.Done():
 				p.mu.Lock()
-				// Remove ourself from waiters
+				// Remove ourself from waiters.
+				removed := false
 				for i, w := range p.waiters {
 					if w == waitChan {
 						p.waiters = append(p.waiters[:i], p.waiters[i+1:]...)
+						removed = true
 						break
 					}
 				}
 				p.mu.Unlock()
+
+				if !removed {
+					// We were already dequeued, so a connection is either in
+					// flight to us or sitting in our buffered channel. Nobody
+					// else can reach it: if we simply returned, it would stay
+					// live, stay in p.active and stay counted against MaxOpen
+					// forever. Hand it back instead.
+					//
+					// It is returned as a failed borrow, so Put closes it and
+					// settles the accounting rather than issuing an SMTP RSET.
+					// Our context is already dead; blocking this goroutine on
+					// another server round-trip is exactly how a cancelled
+					// shutdown ends up hanging. Losing one connection to a
+					// race this rare costs nothing.
+					if client := <-waitChan; client != nil {
+						p.Put(client, ctx.Err())
+					}
+				}
 				return nil, ctx.Err()
 			case client := <-waitChan:
 				p.mu.Lock()
@@ -195,7 +215,7 @@ func (p *Pool) Put(client *smtp.Client, err error) {
 
 	p.mu.Lock()
 	if p.closed {
-		p.open--
+		p.decOpenLocked()
 		p.mu.Unlock()
 		_ = client.Quit()
 		return
@@ -213,7 +233,7 @@ func (p *Pool) Put(client *smtp.Client, err error) {
 
 	// Exceeding MaxIdle
 	if len(p.idle) >= p.config.MaxIdle {
-		p.open--
+		p.decOpenLocked()
 		p.mu.Unlock()
 		_ = client.Quit()
 		return
@@ -237,7 +257,13 @@ func (p *Pool) Close() error {
 	p.closed = true
 	idle := p.idle
 	p.idle = nil
-	p.open = 0
+	// Only the idle connections are being closed here. Connections that are
+	// still checked out remain open until their holder calls Put, which
+	// decrements the count then; zeroing it here would drive it negative.
+	p.open -= len(idle)
+	if p.open < 0 {
+		p.open = 0
+	}
 	for _, w := range p.waiters {
 		w <- nil
 	}
@@ -263,8 +289,14 @@ func (p *Pool) Stats() Stats {
 	}
 }
 
+// decOpenLocked releases one slot from the open count and wakes a waiter so it
+// can retry. The floor at zero is defensive: an accounting slip should show up
+// as a wrong-but-sane number in Stats, never as a negative one that makes the
+// MaxOpen check let everything through.
 func (p *Pool) decOpenLocked() {
-	p.open--
+	if p.open > 0 {
+		p.open--
+	}
 	if len(p.waiters) > 0 {
 		w := p.waiters[0]
 		p.waiters = p.waiters[1:]

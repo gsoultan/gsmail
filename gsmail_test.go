@@ -86,12 +86,17 @@ func TestParseTemplates(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SetBody failed: %v", err)
 		}
-		if !gsmail.IsHTML(email.Body) {
+		// SetBody sniffs the template and routes HTML to HTMLBody, leaving
+		// Body empty. See the v0.2.0 entry in CHANGELOG.md.
+		if len(email.Body) != 0 {
+			t.Errorf("Body should stay empty for an HTML template, got %q", string(email.Body))
+		}
+		if !gsmail.IsHTML(email.HTMLBody) {
 			t.Error("expected IsHTML to be true")
 		}
 		want := "<h1>Hello World</h1>"
-		if string(email.Body) != want {
-			t.Errorf("got %q, want %q", string(email.Body), want)
+		if string(email.HTMLBody) != want {
+			t.Errorf("got %q, want %q", string(email.HTMLBody), want)
 		}
 	})
 

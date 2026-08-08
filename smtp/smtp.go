@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/smtp"
+	"strconv"
 	"time"
 
 	"github.com/gsoultan/gsmail"
@@ -30,13 +31,18 @@ type Sender struct {
 	// Deliverability
 	DKIMConfig *gsmail.DKIMOptions
 
-	// TLS configuration (optional)
-	// CipherSuites restricts TLS 1.2 (and 1.1) cipher suites; nil uses default secure set.
-	// TLS 1.3 cipher suites are not configurable in Go.
+	// TLS configuration (optional).
+	//
+	// CipherSuites restricts the TLS 1.2 (and below) cipher suites. Leave it
+	// nil to use Go's default set, which is maintained upstream and is the
+	// right choice unless you have a specific compliance requirement. Go does
+	// not allow TLS 1.3 suites to be configured.
 	CipherSuites []uint16
-	// MinVersion is the minimum TLS version (e.g. tls.VersionTLS11, tls.VersionTLS12); 0 uses default (TLS 1.1).
+	// MinVersion is the minimum TLS version. 0 uses DefaultMinTLSVersion
+	// (TLS 1.2). Setting TLS 1.0 or 1.1 is a downgrade; both are deprecated
+	// by RFC 8996.
 	MinVersion uint16
-	// MaxVersion is the maximum TLS version (e.g. tls.VersionTLS12); 0 means no limit (allows TLS 1.3).
+	// MaxVersion is the maximum TLS version; 0 means no limit (allows TLS 1.3).
 	MaxVersion uint16
 }
 
@@ -58,108 +64,104 @@ func (p *Sender) UseOAuth(method gsmail.AuthMethod, ts gsmail.TokenSource) {
 	p.TokenSource = ts
 }
 
-// defaultCipherSuites is the default secure set for TLS 1.1/1.2 (no RC4/3DES).
-var defaultCipherSuites = []uint16{
-	tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-	tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-	tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-	tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-	tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
-	tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
-	tls.TLS_RSA_WITH_AES_128_CBC_SHA,
-	tls.TLS_RSA_WITH_AES_256_CBC_SHA,
-}
+// DefaultMinTLSVersion is the minimum TLS version used when MinVersion is 0.
+//
+// TLS 1.0 and 1.1 are deprecated by RFC 8996 and Go's own client default is
+// TLS 1.2; pinning anything lower would be a downgrade from the standard
+// library, not a hardening measure.
+const DefaultMinTLSVersion = tls.VersionTLS12
 
-// tlsConfig returns a TLS configuration. CipherSuites applies only to TLS 1.1/1.2;
-// TLS 1.3 cipher suites are not configurable in Go.
+// tlsConfig returns a TLS configuration.
+//
+// CipherSuites is left nil unless the caller sets it, so the suite list tracks
+// the Go standard library rather than a hand-maintained copy that silently
+// goes stale. Note that Go only honours CipherSuites for TLS 1.2 and below;
+// TLS 1.3 suites are not configurable.
 func (p *Sender) tlsConfig(serverName string) *tls.Config {
-	cipherSuites := p.CipherSuites
-	if len(cipherSuites) == 0 {
-		cipherSuites = defaultCipherSuites
-	}
 	minVer := p.MinVersion
 	if minVer == 0 {
-		minVer = tls.VersionTLS11
+		minVer = DefaultMinTLSVersion
 	}
-	cfg := &tls.Config{
+	return &tls.Config{
 		ServerName:         serverName,
 		MinVersion:         minVer,
 		MaxVersion:         p.MaxVersion,
-		CipherSuites:       cipherSuites,
+		CipherSuites:       p.CipherSuites,
 		InsecureSkipVerify: p.InsecureSkipVerify,
 	}
-	return cfg
 }
 
 // Send sends an email using the SMTP configuration.
 func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
-	addr := net.JoinHostPort(p.Host, fmt.Sprintf("%d", p.Port))
+	addr := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
 
-	bufPtr := gsmail.GetBuffer()
-	defer gsmail.PutBuffer(bufPtr)
-
-	// Build the email message
-	gsmail.BuildMessage(bufPtr, email)
-
-	// DKIM Signing
-	if p.DKIMConfig != nil {
-		signed, err := gsmail.SignDKIM(*bufPtr, *p.DKIMConfig)
-		if err != nil {
-			return fmt.Errorf("dkim sign: %w", err)
-		}
-		*bufPtr = signed
-	}
-
-	// Collect all recipients
+	// Collect all recipients.
 	recipients := make([]string, 0, len(email.To)+len(email.Cc)+len(email.Bcc))
 	recipients = append(recipients, email.To...)
 	recipients = append(recipients, email.Cc...)
 	recipients = append(recipients, email.Bcc...)
+	if len(recipients) == 0 {
+		return gsmail.NonRetryable(fmt.Errorf("smtp: message has no recipients"))
+	}
 
-	return gsmail.Retry(ctx, p.GetRetryConfig(), func() error {
-		if p.Pool != nil {
-			client, err := p.Pool.Get(ctx)
+	// The message is rendered once, outside the retry loop, so every attempt
+	// carries the same Date and Message-ID. WithMessage propagates a render
+	// failure (an invalid header name, a pinned Content-Type that conflicts
+	// with a multipart body) instead of sending a truncated message.
+	return gsmail.WithMessage(email, func(msg []byte) error {
+		if p.DKIMConfig != nil {
+			signed, err := gsmail.SignDKIM(msg, *p.DKIMConfig)
 			if err != nil {
+				return gsmail.NonRetryable(fmt.Errorf("dkim sign: %w", err))
+			}
+			msg = signed
+		}
+
+		return gsmail.Retry(ctx, p.GetRetryConfig(), func() error {
+			if p.Pool != nil {
+				client, err := p.Pool.Get(ctx)
+				if err != nil {
+					return err
+				}
+				err = p.sendOnClient(client, email.From, recipients, msg)
+				p.Pool.Put(client, err)
 				return err
 			}
-			err = p.sendOnClient(client, email.From, recipients, *bufPtr)
-			p.Pool.Put(client, err)
-			return err
-		}
 
-		// Build auth on demand
-		var auth smtp.Auth
-		var isOAuth bool
-		if p.AuthMethod == gsmail.AuthXOAUTH2 || p.AuthMethod == gsmail.AuthOAUTHBEARER {
-			isOAuth = true
-			if p.TokenSource == nil {
-				return fmt.Errorf("oauth2 token source is nil")
+			// Build auth on demand so a rotating token is refreshed per attempt.
+			var auth smtp.Auth
+			var isOAuth bool
+			if p.AuthMethod == gsmail.AuthXOAUTH2 || p.AuthMethod == gsmail.AuthOAUTHBEARER {
+				isOAuth = true
+				if p.TokenSource == nil {
+					return gsmail.NonRetryable(fmt.Errorf("oauth2 token source is nil"))
+				}
+				tok, err := p.TokenSource(ctx)
+				if err != nil {
+					return fmt.Errorf("token source: %w", err)
+				}
+				if p.AuthMethod == gsmail.AuthXOAUTH2 {
+					auth = gsmail.NewXOAUTH2Auth(p.Username, tok)
+				} else {
+					auth = gsmail.NewOAuthBearerAuth(p.Username, tok)
+				}
+			} else if p.Username != "" {
+				auth = smtp.PlainAuth("", p.Username, p.Password, p.Host)
 			}
-			tok, err := p.TokenSource(ctx)
-			if err != nil {
-				return fmt.Errorf("token source: %w", err)
-			}
-			if p.AuthMethod == gsmail.AuthXOAUTH2 {
-				auth = gsmail.NewXOAUTH2Auth(p.Username, tok)
-			} else {
-				auth = gsmail.NewOAuthBearerAuth(p.Username, tok)
-			}
-		} else if p.Username != "" {
-			auth = smtp.PlainAuth("", p.Username, p.Password, p.Host)
-		}
 
-		if p.SSL {
-			return p.sendWithSSL(ctx, addr, auth, email.From, recipients, *bufPtr)
-		}
+			if p.SSL {
+				return p.sendWithSSL(ctx, addr, auth, email.From, recipients, msg)
+			}
 
-		return p.sendPlain(ctx, addr, auth, email.From, recipients, *bufPtr, isOAuth)
+			return p.sendPlain(ctx, addr, auth, email.From, recipients, msg, isOAuth)
+		})
 	})
 }
 
 // EnablePool enables the connection pool with the given configuration.
 func (p *Sender) EnablePool(config PoolConfig) {
 	p.Pool = NewPool(config, func(ctx context.Context) (*smtp.Client, error) {
-		addr := net.JoinHostPort(p.Host, fmt.Sprintf("%d", p.Port))
+		addr := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
 		host, client, err := p.dial(ctx, addr, p.SSL)
 		if err != nil {
 			return nil, err
@@ -236,7 +238,7 @@ func (p *Sender) PoolStats() (Stats, error) {
 // Ping checks the connection to the SMTP server.
 func (p *Sender) Ping(ctx context.Context) error {
 	return gsmail.Retry(ctx, p.GetRetryConfig(), func() error {
-		addr := net.JoinHostPort(p.Host, fmt.Sprintf("%d", p.Port))
+		addr := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
 		_, client, err := p.dial(ctx, addr, p.SSL)
 		if err != nil {
 			return err

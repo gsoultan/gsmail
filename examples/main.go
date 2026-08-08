@@ -15,6 +15,7 @@ import (
 	"github.com/gsoultan/gsmail/smtp"
 )
 
+// useProviders shows the constructor for each API-backed provider.
 func useProviders() {
 	_ = sendgrid.NewSender("SG.api_key")
 	_ = mailgun.NewSender("example.com", "mg_api_key")
@@ -22,6 +23,8 @@ func useProviders() {
 }
 
 func main() {
+	useProviders()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

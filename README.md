@@ -52,9 +52,14 @@ func main() {
         Subject: "Hello from gsmail",
     }
 
-    // 2. Set body with template (automatically detects HTML)
+    // 2. Set body with template. SetBody sniffs the rendered output and
+    //    stores it in HTMLBody (HTML) or Body (plaintext). Call SetHTMLBody
+    //    or SetTextBody to choose explicitly.
     data := map[string]string{"Name": "Developer"}
-    email.SetBody("<h1>Hello {{.Name}}!</h1>", data)
+    email.SetBody("<h1>Hello {{.Name}}!</h1>", data) // -> email.HTMLBody
+
+    // Optional: custom headers reach every provider, not just SMTP.
+    email.SetHeader("List-Unsubscribe", "<https://example.com/unsubscribe>")
 
     // 3. Choose a sender and send
     sender := smtp.NewSender("smtp.example.com", 587, "user", "pass", false)
@@ -158,48 +163,78 @@ In your template you can now use `{{Add $index}}` (or any other custom function)
 
 ### TLS Configuration (Cipher Suites and Versions)
 
-SMTP and IMAP support configurable TLS cipher suites and version limits. **TLS 1.2 cipher suites** can be set explicitly; **TLS 1.3 cipher suites are not configurable** in Go and use the secure defaults.
+**The defaults are already the right choice.** SMTP and IMAP negotiate TLS 1.2 or
+better and use Go's own cipher suite list, which is maintained upstream and
+tracks current guidance. You only need this section if a compliance regime
+forces something narrower.
 
 ```go
 import (
     "crypto/tls"
-    "github.com/gsoultan/gsmail"
     "github.com/gsoultan/gsmail/smtp"
     "github.com/gsoultan/gsmail/imap"
 )
 
-// SMTP: restrict to TLS 1.2 with specific cipher suites
+// Pin to TLS 1.2 exactly, with a restricted suite list.
 sender := smtp.NewSender("smtp.example.com", 587, "user", "pass", false)
+sender.MinVersion = tls.VersionTLS12
+sender.MaxVersion = tls.VersionTLS12 // optional: disable TLS 1.3
 sender.CipherSuites = []uint16{
     tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
     tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-    tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-    tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
 }
-sender.MinVersion = tls.VersionTLS12
-// sender.MaxVersion = tls.VersionTLS12  // optional: disable TLS 1.3
 
-// IMAP: same options
+// IMAP takes the same options.
 receiver := imap.NewReceiver("imap.example.com", 993, "user", "pass", true)
-receiver.CipherSuites = []uint16{
-    tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-    tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-}
 receiver.MinVersion = tls.VersionTLS12
-
-// Example: allow TLS 1.2 and 1.3, but customize only TLS 1.2 cipher suites
-sender2 := smtp.NewSender("smtp.example.com", 587, "user", "pass", false)
-sender2.MinVersion = tls.VersionTLS12           // TLS 1.2 minimum
-sender2.MaxVersion = 0                          // or tls.VersionTLS13; TLS 1.3 allowed
-sender2.CipherSuites = []uint16{                // applies to TLS 1.2 only
-    tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-    tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-}
 ```
 
-- `CipherSuites`: applies to TLS 1.1/1.2 only; nil uses the default secure set.
-- `MinVersion`: e.g. `tls.VersionTLS11`, `tls.VersionTLS12`; 0 defaults to TLS 1.1.
+- `MinVersion`: 0 uses `DefaultMinTLSVersion` (TLS 1.2). TLS 1.0 and 1.1 are
+  deprecated by RFC 8996 — setting them is a downgrade, not a hardening step.
 - `MaxVersion`: e.g. `tls.VersionTLS12` to disable TLS 1.3; 0 means no limit.
+- `CipherSuites`: nil (the default) defers to the Go standard library. Go only
+  honours this for TLS 1.2 and below; **TLS 1.3 suites are not configurable**.
+  Setting it by hand pins a list that will go stale — prefer nil.
+- `InsecureSkipVerify`: disables certificate verification. Test relays only.
+
+### Webhook signature verification
+
+`ParseSESWebhook`, `ParseSendGridWebhook`, `ParseMailgunWebhook` and
+`ParsePostmarkWebhook` parse **unauthenticated** input. Anyone who can reach
+your endpoint can forge a hard bounce and get a real customer suppressed.
+Authenticate the request first:
+
+```go
+// Mailgun — HMAC-SHA256 over timestamp + token.
+mg := gsmail.MailgunVerifier{SigningKey: os.Getenv("MAILGUN_SIGNING_KEY")}
+if err := mg.Verify(body); err != nil {
+    http.Error(w, "forbidden", http.StatusForbidden)
+    return
+}
+event, err := gsmail.ParseMailgunWebhook(body)
+
+// SendGrid — ECDSA P-256 over timestamp + raw body. Pass the body as received;
+// re-marshalling the JSON changes the bytes that were signed.
+sg := &gsmail.SendGridVerifier{PublicKey: os.Getenv("SENDGRID_WEBHOOK_KEY")}
+if err := sg.Verify(r.Header, body); err != nil { /* reject */ }
+
+// Postmark — HTTP Basic credentials embedded in the webhook URL you register.
+pm := gsmail.PostmarkVerifier{Username: "hook", Password: os.Getenv("POSTMARK_HOOK_PW")}
+if err := pm.Verify(r.Header); err != nil { /* reject */ }
+
+// SES via SNS — verifies the signature against the AWS signing certificate.
+// Always set TopicARNs: a valid signature proves the message came from SNS,
+// not that it came from *your* topic.
+sns := &gsmail.SNSVerifier{TopicARNs: []string{os.Getenv("SES_TOPIC_ARN")}}
+msg, err := sns.Verify(ctx, body)
+if err != nil { /* reject */ }
+event, err := gsmail.ParseSESWebhook([]byte(msg.Message))
+```
+
+All verifiers reject timestamps outside `DefaultWebhookTolerance` (5 minutes);
+override it per verifier with `Tolerance`. Mailgun's token is single-use, so
+also record tokens you have already accepted if you need complete replay
+protection.
 
 ### Receiving Emails (IMAP)
 
@@ -275,12 +310,7 @@ email.SetOutlookBody("<html>...</html>", data)
 ```
 
 ### Outlook Compatibility Helpers
-The issue is in GSMail library itself (utils.go). Go's base64.NewEncoder writes raw base64 without line breaks. Even with multipart/alternative, the base64 content is still written as a single long line.
-// GSMail utils.go line 652-655
-b64Text := base64.NewEncoder(base64.StdEncoding, textPart)
-_, _ = b64Text.Write(email.Body)
-_ = b64Text.Close()
-The MIME standard requires base64 to be wrapped at 76 characters, but GSMail doesn't do thi
+
 In addition to the automatic flag, `gsmail` provides helper functions to handle common Outlook layout issues:
 
 - `WrapInGhostTable(html, width, align)`: Wraps content in a conditional MSO table to enforce widths.
@@ -300,6 +330,35 @@ In addition to the automatic flag, `gsmail` provides helper functions to handle 
 - `MSOSafeFontStack()`: Returns an Outlook-safe font stack (Arial, Helvetica, sans-serif).
 - `MSOEmailLayout(width, preheader, header, body, footer)`: Builds a standard email structure with ghost table.
 - `IsOutlookCompatible(html)`: Detects if HTML contains Outlook-specific fixes.
+
+These live in `github.com/gsoultan/gsmail/outlook`:
+
+```go
+import "github.com/gsoultan/gsmail/outlook"
+
+btn := outlook.MSOButton(outlook.ButtonConfig{Text: "Confirm", Link: "https://example.com/confirm"})
+```
+
+Deprecated aliases remain in the root `gsmail` package so existing code keeps
+compiling; they will be removed at v1.
+
+#### What these helpers escape
+
+Each helper takes two kinds of parameter and treats them differently:
+
+- **Text, attribute and URL parameters are untrusted.** Button labels, preheader
+  copy, `alt` text, colours, widths and link targets are escaped for you, and
+  URLs are restricted to `http`, `https`, `mailto`, `tel` and `cid` — a
+  `javascript:` or `data:` URL becomes an inert `#`.
+- **Parameters documented as HTML fragments are trusted** and emitted verbatim:
+  the `content` argument of `MSOTable` and `MSOBackground`, the `html` argument
+  of `WrapInGhostTable`/`MSOOnly`/`HideFromMSO`, the columns of `MSOColumns`,
+  and the `header`/`body`/`footer` of `MSOEmailLayout`. Escape user data before
+  putting it in one of those.
+
+This matters because the output of these helpers becomes the **template source**
+passed to `SetHTMLBody`, and `html/template` treats template text as trusted.
+Contextual auto-escaping never inspects it, so escaping has to happen here.
 
 `gsmail` also automatically injects UTF-8 charset, `lang` attribute, Dark Mode support markers, and CSS when Outlook compatibility is enabled.
 
@@ -456,19 +515,37 @@ if !health.SPF.Valid {
 }
 ```
 
-## Performance Guidelines
+## Writing a provider
 
-This library is designed for performance. To get the most out of it:
+If you implement `gsmail.Sender` — for another API, or for your own internal
+relay — run it against the conformance suite. It checks the things that are
+easy to forget and expensive to get wrong: custom headers reaching the wire,
+permanent 4xx responses not being retried four times, `Retry-After` being
+honoured, `cid:` attachments declared inline, and the provider's own error text
+surviving into the returned error.
 
-- **Use Connection Pooling**: Always enable pooling for high-volume delivery. `gsmail` uses optimized mutex locking and direct connection handoff to minimize latency.
-- **Build with Optimization Flags**: Use the recommended flags to reduce binary size and memory pressure.
-
-```bash
-go build -ldflags="-s -w" -gcflags="-m -l" .
+```go
+func TestConformance(t *testing.T) {
+    providertest.Run(t, providertest.Harness{
+        Name:      "acme",
+        NewSender: func(t *testing.T, baseURL string) gsmail.Sender { /* ... */ },
+        Decode:    func(t *testing.T, r *http.Request, body []byte) providertest.Sent { /* ... */ },
+    })
+}
 ```
 
-- `-s -w`: Reduces binary size by stripping debug symbols.
-- `-gcflags="-m -l"`: `-m` prints optimization decisions (like escape analysis) to help achieve zero allocations, and `-l` disables inlining if needed.
+See `sendgrid/conformance_test.go` for a worked example.
+
+## Performance Guidelines
+
+- **Use connection pooling** for high-volume SMTP delivery.
+- **Render once, send many**: `WithMessage` hands you the rendered message in a
+  pooled buffer, valid only until the callback returns. Use `RenderMessage`
+  when you need to keep it.
+- Rendering is bounded by the network, not by CPU. The library avoids
+  gratuitous work — header emission is linear in header count, the buffer pool
+  is sized to actually recycle real messages — but do not expect allocation
+  count to be your bottleneck.
 
 ## Benchmarks
 

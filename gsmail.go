@@ -52,13 +52,23 @@ func Idle(ctx context.Context, f Receiver) (<-chan Email, <-chan error) {
 	return f.Idle(ctx)
 }
 
-// Ping checks the connection of the given sender or receiver.
-func Ping(ctx context.Context, p any) error {
-	if s, ok := p.(Sender); ok {
-		return s.Ping(ctx)
+// Ping checks the connection of the given sender or receiver. Both Sender and
+// Receiver satisfy Pinger, so the check is enforced at compile time.
+func Ping(ctx context.Context, p Pinger) error {
+	if p == nil {
+		return fmt.Errorf("pinger is nil")
 	}
-	if r, ok := p.(Receiver); ok {
-		return r.Ping(ctx)
+	return p.Ping(ctx)
+}
+
+// Validate validates an address using the given provider, if that provider
+// supports validation. Validation is not part of the Sender or Receiver
+// contract, so a provider that cannot validate reports an error rather than
+// silently succeeding.
+func Validate(ctx context.Context, p any, email string) error {
+	v, ok := p.(AddressValidator)
+	if !ok {
+		return fmt.Errorf("provider does not implement AddressValidator")
 	}
-	return fmt.Errorf("provider does not implement Sender or Receiver interface")
+	return v.Validate(ctx, email)
 }

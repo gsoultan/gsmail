@@ -1,12 +1,99 @@
-package gsmail
+// Package outlook builds Outlook-compatible HTML for email bodies.
+//
+// It lives apart from the transport packages because it is a rendering
+// concern with a different risk profile: everything here produces markup, and
+// that markup becomes the template source passed to Email.SetHTMLBody, which
+// html/template treats as trusted. See the escaping notes below.
+package outlook
 
 import (
 	"bytes"
 	"fmt"
+	"html"
+	"net/url"
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/gsoultan/gsmail/internal/bufpool"
 )
+
+// The MSO* builders below take two kinds of string parameter and treat them
+// very differently:
+//
+//   - Text and attribute parameters (link targets, button labels, colours,
+//     widths, preheader copy) are UNTRUSTED. They are escaped before being
+//     interpolated, and URLs additionally have their scheme checked.
+//   - Parameters documented as HTML fragments (the `content`, `html`, `body`
+//     and column arguments) are TRUSTED markup and are emitted verbatim,
+//     because composing fragments is the entire point of those helpers.
+//
+// This distinction matters more than usual here: the output of these helpers
+// becomes the *template source* passed to SetHTMLBody, and html/template
+// treats template text as trusted. Contextual auto-escaping will not save a
+// caller who interpolates user data into a fragment, so escape it here or
+// escape it yourself before calling.
+
+// escapeAttr escapes a string for use inside a double-quoted HTML attribute.
+func escapeAttr(s string) string { return html.EscapeString(s) }
+
+// escapeText escapes a string for use as HTML text content.
+func escapeText(s string) string { return html.EscapeString(s) }
+
+// safeURLSchemes are the schemes permitted in a generated href or src.
+var safeURLSchemes = map[string]struct{}{
+	"http":   {},
+	"https":  {},
+	"mailto": {},
+	"tel":    {},
+	"cid":    {},
+}
+
+// safeURL validates a URL for use in an href or src attribute and escapes it.
+//
+// A relative URL is allowed. An absolute URL must use a scheme from
+// safeURLSchemes, which keeps "javascript:", "data:" and "vbscript:" payloads
+// out of generated markup. Anything rejected becomes "#", so a bad URL
+// produces an inert link rather than an executable one.
+func safeURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return "#"
+	}
+	if u.Scheme != "" {
+		if _, ok := safeURLSchemes[strings.ToLower(u.Scheme)]; !ok {
+			return "#"
+		}
+	} else if strings.Contains(trimmed, ":") &&
+		strings.IndexByte(trimmed, ':') < strings.IndexByte(trimmed+"/", '/') {
+		// url.Parse tolerates a few malformed scheme-ish prefixes; reject
+		// anything that still looks like it carries one.
+		return "#"
+	}
+
+	return escapeAttr(u.String())
+}
+
+// escapeStyle escapes a CSS declaration list for use in a style attribute.
+// It is deliberately conservative: the value is attribute-escaped and any
+// construct that could reopen a tag or start a CSS expression is dropped.
+func escapeStyle(s string) string {
+	if s == "" {
+		return ""
+	}
+	lower := strings.ToLower(s)
+	for _, bad := range []string{"javascript:", "expression(", "</", "<script", "behavior:", "-moz-binding"} {
+		if strings.Contains(lower, bad) {
+			return ""
+		}
+	}
+	return escapeAttr(s)
+}
 
 var (
 	tagHtmlLower = []byte("<html")
@@ -15,8 +102,6 @@ var (
 	tagHeadUpper = []byte("<HEAD")
 	tagBodyLower = []byte("<body")
 	tagBodyUpper = []byte("<BODY")
-	tagTable     = []byte("<table")
-	tagImg       = []byte("<img")
 
 	outlookNamespaces = []byte(` xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns:m="http://schemas.microsoft.com/office/2004/12/omml"`)
 	outlookHeadTags   = []byte(`
@@ -117,8 +202,8 @@ func ToOutlookHTML(html []byte) []byte {
 		return html
 	}
 
-	bufPtr := GetBuffer()
-	defer PutBuffer(bufPtr)
+	bufPtr := bufpool.Get()
+	defer bufpool.Put(bufPtr)
 
 	htmlIdx := findTag(html, tagHtmlLower, tagHtmlUpper)
 	headIdx := findTag(html, tagHeadLower, tagHeadUpper)
@@ -279,6 +364,8 @@ func appendNormalized(dest *[]byte, src []byte) {
 
 // MSOTable generates a normalized table for Outlook with standard email-safe attributes.
 // Empty or whitespace-only content is replaced with &nbsp; to prevent Outlook from collapsing cells.
+// width, align and style are attribute values and are escaped; content is
+// treated as trusted HTML.
 func MSOTable(width, align, style, content string) string {
 	if align == "" {
 		align = "left"
@@ -290,7 +377,7 @@ func MSOTable(width, align, style, content string) string {
 		content = "&nbsp;"
 	}
 	return fmt.Sprintf(`<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="%s" align="%s" style="%s"><tr><td>%s</td></tr></table>`,
-		width, align, style, content)
+		escapeAttr(width), escapeAttr(align), escapeStyle(style), content)
 }
 
 // MSOSpacer generates an Outlook-compatible vertical spacer.
@@ -321,7 +408,7 @@ func WrapInGhostTable(html string, width string, align string) string {
 		content = "&nbsp;"
 	}
 	return `<!--[if mso]>
-    <table role="presentation" width="` + width + `" cellspacing="0" cellpadding="0" border="0" align="` + align + `">
+    <table role="presentation" width="` + escapeAttr(width) + `" cellspacing="0" cellpadding="0" border="0" align="` + escapeAttr(align) + `">
     <tr>
     <td>
     <![endif]-->
@@ -352,7 +439,7 @@ func MSOPreheader(text string) string {
 	if text == "" {
 		return ""
 	}
-	return fmt.Sprintf(`<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">%s</div>`, text)
+	return fmt.Sprintf(`<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">%s</div>`, escapeText(text))
 }
 
 // MSOPreheaderTruncated returns preheader HTML, truncating text to maxLen runes (appends "…" when truncated).
@@ -374,7 +461,7 @@ func MSOEmoji(text string) string {
 	if text == "" {
 		return ""
 	}
-	return fmt.Sprintf(`<span class="mso-emoji" style="font-family:'Segoe UI Emoji','Segoe UI Symbol',Arial,sans-serif;">%s</span>`, text)
+	return fmt.Sprintf(`<span class="mso-emoji" style="font-family:'Segoe UI Emoji','Segoe UI Symbol',Arial,sans-serif;">%s</span>`, escapeText(text))
 }
 
 // MSOSafeFontStack returns an Outlook-safe font stack (Arial, Helvetica, sans-serif).
@@ -464,6 +551,13 @@ func MSOButton(cfg ButtonConfig) string {
 		}
 	}
 
+	link := safeURL(cfg.Link)
+	bgColor := escapeAttr(cfg.BgColor)
+	color := escapeAttr(cfg.Color)
+	fontFamily := escapeAttr(cfg.FontFamily)
+	fontWeight := escapeAttr(cfg.FontWeight)
+	text := escapeText(cfg.Text)
+
 	return fmt.Sprintf(`<div><!--[if mso]>
     <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="%s" style="height:%s;v-text-anchor:middle;width:%s;" arcsize="%d%%" stroke="f" fillcolor="%s">
     <w:anchorlock/>
@@ -474,8 +568,8 @@ func MSOButton(cfg ButtonConfig) string {
     </center>
     </v:roundrect>
     <![endif]--></div>`,
-		cfg.Link, heightStr, widthStr, arcsize, cfg.BgColor,
-		cfg.Link, cfg.BgColor, cfg.BorderRadius, cfg.Color, cfg.FontFamily, fontSizeStr, cfg.FontWeight, heightStr, widthStr, cfg.Text)
+		link, heightStr, widthStr, arcsize, bgColor,
+		link, bgColor, cfg.BorderRadius, color, fontFamily, fontSizeStr, fontWeight, heightStr, widthStr, text)
 }
 
 // MSOImage generates an image tag with Outlook-specific fixes.
@@ -489,7 +583,7 @@ func MSOImage(src, alt string, width, height int, style string) string {
 		hAttr = fmt.Sprintf(` height="%d"`, height)
 	}
 	return fmt.Sprintf(`<img src="%s" alt="%s"%s%s style="display:block; border:0; outline:none; text-decoration:none; -ms-interpolation-mode:bicubic; %s">`,
-		src, alt, wAttr, hAttr, style)
+		safeURL(src), escapeAttr(alt), wAttr, hAttr, escapeStyle(style))
 }
 
 // MSOFontStack returns a font stack string that ensures better fallback in Outlook.
@@ -502,6 +596,9 @@ func MSOFontStack(fonts ...string) string {
 		if i > 0 {
 			res += ", "
 		}
+		// Font names land inside a style attribute delimited by single quotes,
+		// so strip quote characters before escaping for the attribute itself.
+		f = escapeAttr(strings.NewReplacer("'", "", `"`, "", ";", "").Replace(f))
 		if bytes.Contains([]byte(f), []byte(" ")) {
 			res += "'" + f + "'"
 		} else {
@@ -523,11 +620,14 @@ func MSOBackground(url string, color string, width, height int, content string) 
 		heightStr = fmt.Sprintf("%dpx", height)
 	}
 
+	safeSrc := safeURL(url)
+	safeColor := escapeAttr(color)
+
 	fill := ""
-	if url != "" {
-		fill = fmt.Sprintf(`<v:fill type="tile" src="%s" color="%s" />`, url, color)
+	if safeSrc != "" {
+		fill = fmt.Sprintf(`<v:fill type="tile" src="%s" color="%s" />`, safeSrc, safeColor)
 	} else {
-		fill = fmt.Sprintf(`<v:fill color="%s" />`, color)
+		fill = fmt.Sprintf(`<v:fill color="%s" />`, safeColor)
 	}
 	if strings.TrimSpace(content) == "" {
 		content = "&nbsp;"
@@ -547,7 +647,7 @@ func MSOBackground(url string, color string, width, height int, content string) 
     </v:textbox>
   </v:rect>
   <![endif]-->
-</div>`, color, url, widthStr, heightStr, fill, content)
+</div>`, safeColor, safeSrc, widthStr, heightStr, fill, content)
 }
 
 // MSOColumns wraps multiple HTML fragments into Outlook-compatible side-by-side columns using ghost tables.
@@ -557,8 +657,8 @@ func MSOColumns(widths []int, cols ...string) string {
 		return ""
 	}
 
-	bufPtr := GetBuffer()
-	defer PutBuffer(bufPtr)
+	bufPtr := bufpool.Get()
+	defer bufpool.Put(bufPtr)
 
 	// Fallback for non-Outlook: flex or inline-block
 	*bufPtr = append(*bufPtr, []byte(`<div style="font-size:0; text-align:center;">`)...)
@@ -603,35 +703,41 @@ func MSOColumns(widths []int, cols ...string) string {
 
 	res := make([]byte, len(*bufPtr))
 	copy(res, *bufPtr)
-	return UnsafeBytesToString(res)
+	return string(res)
 }
 
 // MSOBulletList generates a consistent bulleted list that renders well in Outlook by avoiding native <ul> tags.
+//
+// items and bullet are treated as text and are escaped. Compose any markup you
+// need into the surrounding template rather than into a list item.
 func MSOBulletList(items []string, bullet string, style string) string {
 	if len(items) == 0 {
 		return ""
 	}
 	if bullet == "" {
-		bullet = "&#8226;" // Standard bullet
+		bullet = "&#8226;" // Standard bullet, already an HTML entity.
+	} else {
+		bullet = escapeText(bullet)
 	}
+	safeStyle := escapeStyle(style)
 
-	bufPtr := GetBuffer()
-	defer PutBuffer(bufPtr)
+	bufPtr := bufpool.Get()
+	defer bufpool.Put(bufPtr)
 
 	*bufPtr = append(*bufPtr, []byte(`<table role="presentation" border="0" cellspacing="0" cellpadding="0">`)...)
 	for _, item := range items {
-		itemContent := item
-		if strings.TrimSpace(itemContent) == "" {
+		itemContent := escapeText(item)
+		if strings.TrimSpace(item) == "" {
 			itemContent = "&nbsp;"
 		}
 		*bufPtr = append(*bufPtr, []byte(`<tr>`)...)
-		*bufPtr = append(*bufPtr, []byte(fmt.Sprintf(`<td style="padding:0 10px 0 0; vertical-align:top; %s">%s</td>`, style, bullet))...)
-		*bufPtr = append(*bufPtr, []byte(fmt.Sprintf(`<td style="vertical-align:top; %s">%s</td>`, style, itemContent))...)
+		*bufPtr = append(*bufPtr, []byte(fmt.Sprintf(`<td style="padding:0 10px 0 0; vertical-align:top; %s">%s</td>`, safeStyle, bullet))...)
+		*bufPtr = append(*bufPtr, []byte(fmt.Sprintf(`<td style="vertical-align:top; %s">%s</td>`, safeStyle, itemContent))...)
 		*bufPtr = append(*bufPtr, []byte(`</tr>`)...)
 	}
 	*bufPtr = append(*bufPtr, []byte(`</table>`)...)
 
 	res := make([]byte, len(*bufPtr))
 	copy(res, *bufPtr)
-	return UnsafeBytesToString(res)
+	return string(res)
 }

@@ -2,6 +2,7 @@ package gsmail
 
 import (
 	"encoding/base64"
+	"errors"
 	"net/smtp"
 	"strings"
 	"testing"
@@ -9,7 +10,8 @@ import (
 
 func TestXOAUTH2SMTPAuthStart(t *testing.T) {
 	a := NewXOAUTH2Auth("user@example.com", "ya29.test-token")
-	mech, ir, err := a.Start(&smtp.ServerInfo{})
+	// A bearer token is only released over TLS; see TestOAuthRefusesPlaintext.
+	mech, ir, err := a.Start(&smtp.ServerInfo{Name: "smtp.example.com", TLS: true})
 	if err != nil {
 		t.Fatalf("Start returned error: %v", err)
 	}
@@ -40,7 +42,7 @@ func TestXOAUTH2SASLClientStart(t *testing.T) {
 
 func TestOAuthBearerSMTPAuthStart(t *testing.T) {
 	a := NewOAuthBearerAuth("user@example.com", "token")
-	mech, ir, err := a.Start(&smtp.ServerInfo{})
+	mech, ir, err := a.Start(&smtp.ServerInfo{Name: "smtp.example.com", TLS: true})
 	if err != nil {
 		t.Fatalf("Start returned error: %v", err)
 	}
@@ -49,6 +51,38 @@ func TestOAuthBearerSMTPAuthStart(t *testing.T) {
 	}
 	if len(ir) == 0 {
 		t.Fatalf("expected non-empty initial response for OAUTHBEARER")
+	}
+}
+
+// A STARTTLS-stripping man in the middle must not be handed the bearer token.
+func TestOAuthRefusesPlaintext(t *testing.T) {
+	plaintext := &smtp.ServerInfo{Name: "smtp.example.com", TLS: false}
+
+	for name, auth := range map[string]smtp.Auth{
+		"XOAUTH2":     NewXOAUTH2Auth("user@example.com", "secret-token"),
+		"OAUTHBEARER": NewOAuthBearerAuth("user@example.com", "secret-token"),
+	} {
+		_, ir, err := auth.Start(plaintext)
+		if !errors.Is(err, ErrInsecureAuth) {
+			t.Errorf("%s: got err %v, want ErrInsecureAuth", name, err)
+		}
+		if len(ir) != 0 {
+			t.Errorf("%s: leaked %d bytes of credential material on a plaintext connection", name, len(ir))
+		}
+	}
+}
+
+// Loopback is exempt, mirroring net/smtp.PlainAuth, and the explicit
+// *Insecure constructors opt out for a trusted local relay.
+func TestOAuthPlaintextEscapeHatches(t *testing.T) {
+	if _, _, err := NewXOAUTH2Auth("u", "t").Start(&smtp.ServerInfo{Name: "localhost"}); err != nil {
+		t.Errorf("localhost should be exempt: %v", err)
+	}
+	if _, _, err := NewXOAUTH2AuthInsecure("u", "t").Start(&smtp.ServerInfo{Name: "relay.internal"}); err != nil {
+		t.Errorf("NewXOAUTH2AuthInsecure should permit plaintext: %v", err)
+	}
+	if _, _, err := NewOAuthBearerAuthInsecure("u", "t").Start(&smtp.ServerInfo{Name: "relay.internal"}); err != nil {
+		t.Errorf("NewOAuthBearerAuthInsecure should permit plaintext: %v", err)
 	}
 }
 
