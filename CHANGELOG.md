@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the module is at `v0`, breaking changes ship in minor releases. Read the
 **Breaking** section before upgrading.
 
+## [Unreleased]
+
+### Fixed
+
+- **SMTP retried permanent delivery failures.** A `550` reply was wrapped in a
+  plain error, so `IsRetryable` defaulted to true and the message was sent four
+  times. Repeated delivery to an address the receiver has already rejected is
+  not just wasted work, it is a deliverability signal counted against the
+  sender. SMTP reply codes are now classified the way RFC 5321 defines them:
+  4xx transient, 5xx permanent. This is what `HTTPError` already did for the
+  API-backed providers.
+
+### Added
+
+- **`providertest.RunSMTP`**, extending the conformance suite to SMTP. It
+  asserts the same message-level contract as the HTTP suite against a message
+  decoded off the wire, plus the cases only SMTP has: Bcc must reach RCPT TO
+  and must *not* appear in the message headers, and a generated message must
+  carry Date and Message-ID. The SMTP sender is run through it both with and
+  without the connection pool.
+
+  It found the 550 retry bug above on its first run, which is the second time
+  extending this suite to a new transport has immediately turned up a real
+  defect.
+
 ## [v0.5.0]
 
 ### Added
