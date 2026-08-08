@@ -1,4 +1,3 @@
-// Package gsmail provides a high-performance email library.
 package gsmail
 
 import (
