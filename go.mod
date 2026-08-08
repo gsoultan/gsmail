@@ -1,6 +1,6 @@
 module github.com/gsoultan/gsmail
 
-go 1.25.5
+go 1.25.12
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5

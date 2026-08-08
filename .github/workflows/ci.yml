@@ -14,14 +14,28 @@ concurrency:
 
 jobs:
   build:
-    name: build & test
+    # Test both the floor declared in go.mod and the current release. The
+    # floor is what consumers may actually build with; "stable" catches
+    # forward-compatibility breakage before a Go release does.
+    name: build & test (go ${{ matrix.go }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: [go.mod, stable]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
+        if: matrix.go == 'go.mod'
         with:
           go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-go@v5
+        if: matrix.go != 'go.mod'
+        with:
+          go-version: ${{ matrix.go }}
           cache: true
 
       - name: Verify go.mod and go.sum are tidy
