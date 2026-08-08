@@ -38,14 +38,25 @@ func NewReceiver(host string, port int, username, password string, ssl bool) *Re
 	}
 }
 
+// opt builds the client configuration for the underlying POP3 library.
+//
+// InsecureSkipVerify is plumbed through here. It used to be declared on
+// Receiver and never read, so setting it silently did nothing and a caller who
+// needed it against a self-signed relay got certificate errors they could not
+// turn off.
+func (f *Receiver) opt() gopop3.Opt {
+	return gopop3.Opt{
+		Host:          f.Host,
+		Port:          f.Port,
+		TLSEnabled:    f.SSL,
+		TLSSkipVerify: f.InsecureSkipVerify,
+	}
+}
+
 // Ping checks the connection to the POP3 server.
 func (f *Receiver) Ping(ctx context.Context) error {
 	return gsmail.Retry(ctx, f.GetRetryConfig(), func() error {
-		p := gopop3.New(gopop3.Opt{
-			Host:       f.Host,
-			Port:       f.Port,
-			TLSEnabled: f.SSL,
-		})
+		p := gopop3.New(f.opt())
 
 		conn, err := p.NewConn()
 		if err != nil {
@@ -76,8 +87,13 @@ func (f *Receiver) Idle(ctx context.Context) (<-chan gsmail.Email, <-chan error)
 	return emailChan, errChan
 }
 
-// Receive retrieves emails using POP3.
+// Receive retrieves the newest messages, most recent first.
+// limit must be greater than zero; see gsmail.ErrInvalidLimit.
 func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, error) {
+	if err := gsmail.CheckLimit(limit); err != nil {
+		return nil, err
+	}
+
 	var emails []gsmail.Email
 	err := gsmail.Retry(ctx, f.GetRetryConfig(), func() error {
 		var err error
@@ -88,11 +104,7 @@ func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 }
 
 func (f *Receiver) receive(ctx context.Context, limit int) ([]gsmail.Email, error) {
-	p := gopop3.New(gopop3.Opt{
-		Host:       f.Host,
-		Port:       f.Port,
-		TLSEnabled: f.SSL,
-	})
+	p := gopop3.New(f.opt())
 
 	conn, err := p.NewConn()
 	if err != nil {

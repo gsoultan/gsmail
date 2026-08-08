@@ -53,34 +53,44 @@ func NewReceiver(host string, port int, username, password string, ssl bool) *Re
 	}
 }
 
-// defaultCipherSuites is the default secure set for TLS 1.1/1.2 (no RC4/3DES).
-var defaultCipherSuites = []uint16{
-	tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-	tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-	tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-	tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-	tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
-	tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
-	tls.TLS_RSA_WITH_AES_128_CBC_SHA,
-	tls.TLS_RSA_WITH_AES_256_CBC_SHA,
-}
+// DefaultMinTLSVersion is the minimum TLS version used when MinVersion is 0.
+//
+// TLS 1.0 and 1.1 are deprecated by RFC 8996 and Go's own client default is
+// TLS 1.2; pinning anything lower would be a downgrade from the standard
+// library, not a hardening measure.
+const DefaultMinTLSVersion = tls.VersionTLS12
 
-// tlsConfig returns a TLS configuration. CipherSuites applies only to TLS 1.1/1.2;
-// TLS 1.3 cipher suites are not configurable in Go.
+// maxFetchWorkers bounds the goroutines that parse fetched messages.
+const maxFetchWorkers = 10
+
+// updateBufferSize is the capacity of the IMAP unilateral-update channel.
+// It only has to absorb a burst while the drain goroutine is scheduled.
+const updateBufferSize = 64
+
+// idleShutdownTimeout bounds how long Idle waits for an in-flight IDLE to
+// unwind before tearing the connection down anyway.
+const idleShutdownTimeout = 10 * time.Second
+
+// idleRefreshInterval is how long a single IDLE command runs before being
+// renewed. RFC 2177 requires re-issuing at least every 29 minutes.
+const idleRefreshInterval = 29 * time.Minute
+
+// tlsConfig returns a TLS configuration.
+//
+// CipherSuites is left nil unless the caller sets it, so the suite list tracks
+// the Go standard library rather than a hand-maintained copy that silently
+// goes stale. Note that Go only honours CipherSuites for TLS 1.2 and below;
+// TLS 1.3 suites are not configurable.
 func (f *Receiver) tlsConfig() *tls.Config {
-	cipherSuites := f.CipherSuites
-	if len(cipherSuites) == 0 {
-		cipherSuites = defaultCipherSuites
-	}
 	minVer := f.MinVersion
 	if minVer == 0 {
-		minVer = tls.VersionTLS11
+		minVer = DefaultMinTLSVersion
 	}
 	return &tls.Config{
 		ServerName:         f.Host,
 		MinVersion:         minVer,
 		MaxVersion:         f.MaxVersion,
-		CipherSuites:       cipherSuites,
+		CipherSuites:       f.CipherSuites,
 		InsecureSkipVerify: f.InsecureSkipVerify,
 	}
 }
@@ -175,8 +185,13 @@ func (f *Receiver) authenticate(ctx context.Context, c *client.Client, tlsOn boo
 	return nil
 }
 
-// Receive retrieves emails using IMAP.
+// Receive retrieves the newest messages from INBOX, most recent first.
+// limit must be greater than zero; see gsmail.ErrInvalidLimit.
 func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, error) {
+	if err := gsmail.CheckLimit(limit); err != nil {
+		return nil, err
+	}
+
 	var emails []gsmail.Email
 	err := gsmail.Retry(ctx, f.GetRetryConfig(), func() error {
 		c, tlsOn, err := f.connect(ctx)
@@ -214,8 +229,13 @@ func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 	return emails, err
 }
 
-// Search searches for emails using IMAP.
+// Search searches INBOX and returns at most limit messages, newest first.
+// limit must be greater than zero; see gsmail.ErrInvalidLimit.
 func (f *Receiver) Search(ctx context.Context, options gsmail.SearchOptions, limit int) ([]gsmail.Email, error) {
+	if err := gsmail.CheckLimit(limit); err != nil {
+		return nil, err
+	}
+
 	var emails []gsmail.Email
 	err := gsmail.Retry(ctx, f.GetRetryConfig(), func() error {
 		c, tlsOn, err := f.connect(ctx)
@@ -301,49 +321,106 @@ func (f *Receiver) Idle(ctx context.Context) (<-chan gsmail.Email, <-chan error)
 
 		idleClient := idle.NewClient(c)
 
-		// Create a channel for mailbox updates
-		updates := make(chan client.Update, 10)
+		// go-imap delivers unilateral updates on the connection's own reader
+		// goroutine. If nothing drains this channel the reader blocks, and the
+		// response to whatever command we are waiting on can never arrive.
+		// Drain it continuously and coalesce into one pending signal: "the
+		// mailbox changed" does not need a queue.
+		updates := make(chan client.Update, updateBufferSize)
 		c.Updates = updates
 
-		stop := make(chan struct{})
-		done := make(chan error, 1)
+		poke := make(chan struct{}, 1)
+		quit := make(chan struct{})
+		defer close(quit)
 
 		go func() {
-			// IDLE with fallback for servers that don't support it
-			done <- idleClient.IdleWithFallback(stop, 29*time.Minute)
+			for {
+				select {
+				case u := <-updates:
+					if _, ok := u.(*client.MailboxUpdate); !ok {
+						continue
+					}
+					select {
+					case poke <- struct{}{}:
+					default:
+					}
+				case <-quit:
+					return
+				}
+			}
 		}()
 
+		// An IMAP connection carries one command at a time, and IDLE occupies
+		// it until the client sends DONE. Searching or fetching while the IDLE
+		// goroutine still holds the connection is both a data race on the
+		// go-imap writer and a protocol violation, so each round here is:
+		// idle -> interrupt -> do the work -> idle again.
 		for {
+			stop := make(chan struct{})
+			done := make(chan error, 1)
+			go func() {
+				done <- idleClient.IdleWithFallback(stop, idleRefreshInterval)
+			}()
+
+			// endIdle sends DONE and waits for the IDLE command to complete,
+			// so the connection is ours again before we touch it.
+			endIdle := func() error {
+				close(stop)
+				select {
+				case err := <-done:
+					return err
+				case <-time.After(idleShutdownTimeout):
+					// The connection is wedged. Report it and let the deferred
+					// Logout tear it down rather than hanging the caller.
+					return fmt.Errorf("imap: idle did not terminate within %s", idleShutdownTimeout)
+				}
+			}
+
+			var idleErr error
 			select {
 			case <-ctx.Done():
-				close(stop)
+				_ = endIdle()
 				return
-			case err := <-done:
-				if err != nil {
-					errChan <- fmt.Errorf("idle error: %w", err)
+			case idleErr = <-done:
+				// IDLE ended on its own: the refresh interval elapsed, or the
+				// connection failed. Either way we now own the connection.
+			case <-poke:
+				idleErr = endIdle()
+			}
+
+			if idleErr != nil {
+				errChan <- fmt.Errorf("idle error: %w", idleErr)
+				return
+			}
+
+			// The connection is free; safe to issue commands.
+			criteria := goimap.NewSearchCriteria()
+			criteria.WithoutFlags = []string{goimap.SeenFlag}
+			uids, err := c.Search(criteria)
+			if err != nil {
+				errChan <- fmt.Errorf("imap search: %w", err)
+				return
+			}
+			if len(uids) == 0 {
+				continue
+			}
+
+			seqset := new(goimap.SeqSet)
+			seqset.AddNum(uids...)
+			emails, err := f.fetch(ctx, c, seqset, len(uids))
+			if err != nil {
+				if ctx.Err() != nil {
+					return
 				}
+				errChan <- fmt.Errorf("imap fetch: %w", err)
 				return
-			case update := <-updates:
-				if mboxUpdate, ok := update.(*client.MailboxUpdate); ok {
-					// When mailbox is updated, fetch unseen messages
-					criteria := goimap.NewSearchCriteria()
-					criteria.WithoutFlags = []string{goimap.SeenFlag}
-					uids, err := c.Search(criteria)
-					if err == nil && len(uids) > 0 {
-						seqset := new(goimap.SeqSet)
-						seqset.AddNum(uids...)
-						emails, err := f.fetch(ctx, c, seqset, len(uids))
-						if err == nil {
-							for _, e := range emails {
-								select {
-								case emailChan <- e:
-								case <-ctx.Done():
-									return
-								}
-							}
-						}
-					}
-					_ = mboxUpdate
+			}
+
+			for _, e := range emails {
+				select {
+				case emailChan <- e:
+				case <-ctx.Done():
+					return
 				}
 			}
 		}
@@ -353,6 +430,15 @@ func (f *Receiver) Idle(ctx context.Context) (<-chan gsmail.Email, <-chan error)
 }
 
 func (f *Receiver) fetch(ctx context.Context, c *client.Client, seqset *goimap.SeqSet, limit int) ([]gsmail.Email, error) {
+	// Never size a channel or a worker pool straight from caller input.
+	// A negative limit panics make(chan), and a zero limit spawns no workers,
+	// so nothing drains `messages`: the indexer blocks, c.Fetch blocks, and
+	// the final <-done below hangs with no context escape. Callers are checked
+	// in Receive and Search; this floor keeps the invariant local too.
+	if limit < 1 {
+		limit = 1
+	}
+
 	type indexedMessage struct {
 		idx int
 		msg *goimap.Message
@@ -364,12 +450,46 @@ func (f *Receiver) fetch(ctx context.Context, c *client.Client, seqset *goimap.S
 		done <- c.Fetch(seqset, []goimap.FetchItem{goimap.FetchRFC822}, fetchMessages)
 	}()
 
-	count := 0
+	// c.Fetch is not context-aware, and an IMAP connection carries one command
+	// at a time. Simply returning when the context fires would leave FETCH in
+	// flight on a client the caller is about to log out of -- concurrent use of
+	// a connection go-imap does not synchronise. Instead, tear the connection
+	// down so the command fails fast, and always wait for it below.
+	watchdog := make(chan struct{})
+	defer close(watchdog)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = c.Terminate()
+		case <-watchdog:
+		}
+	}()
+
+	// Index and forward the fetched messages.
+	//
+	// The counter is goroutine-local. It used to be shared with the collector
+	// below, which read it to order the results -- but the workers abandon
+	// `messages` when the context is cancelled, so the collector could reach
+	// that read while this goroutine was still incrementing. That was a data
+	// race; ordering is now derived from the collected indices instead.
+	//
+	// fetchMessages is drained to completion even after cancellation. c.Fetch
+	// writes into it and only returns once it is emptied, so bailing out early
+	// would strand the Fetch goroutine and leave `done` unwritten.
 	go func() {
 		defer close(messages)
+		idx := 0
+		cancelled := false
 		for msg := range fetchMessages {
-			messages <- indexedMessage{idx: count, msg: msg}
-			count++
+			if cancelled {
+				continue
+			}
+			select {
+			case messages <- indexedMessage{idx: idx, msg: msg}:
+				idx++
+			case <-ctx.Done():
+				cancelled = true
+			}
 		}
 	}()
 
@@ -381,7 +501,7 @@ func (f *Receiver) fetch(ctx context.Context, c *client.Client, seqset *goimap.S
 	results := make(chan result, limit)
 	var wg sync.WaitGroup
 
-	numWorkers := 10
+	numWorkers := maxFetchWorkers
 	if limit < numWorkers {
 		numWorkers = limit
 	}
@@ -434,18 +554,40 @@ func (f *Receiver) fetch(ctx context.Context, c *client.Client, seqset *goimap.S
 		}
 	}
 
+	// Always wait for FETCH to finish. The watchdog above guarantees this
+	// terminates: either the server responds, or the context fires and the
+	// connection is torn down under it.
 	if err := <-done; err != nil {
-		if fetchErr != nil {
+		switch {
+		case ctx.Err() != nil:
+			// The failure is the cancellation, not the server.
+			if fetchErr == nil {
+				fetchErr = ctx.Err()
+			}
+		case fetchErr != nil:
 			fetchErr = fmt.Errorf("%v (fetch error: %w)", fetchErr, err)
-		} else {
+		default:
 			fetchErr = fmt.Errorf("imap fetch error: %w", err)
 		}
+	} else if ctx.Err() != nil && fetchErr == nil {
+		fetchErr = ctx.Err()
 	}
 
+	// Restore the order the server delivered messages in, using the highest
+	// index actually collected rather than a counter shared with the indexer
+	// goroutine.
 	emails := make([]gsmail.Email, 0, len(emailsMap))
-	for i := 0; i < count; i++ {
-		if email, ok := emailsMap[i]; ok {
-			emails = append(emails, email)
+	if len(emailsMap) > 0 {
+		maxIdx := 0
+		for idx := range emailsMap {
+			if idx > maxIdx {
+				maxIdx = idx
+			}
+		}
+		for i := 0; i <= maxIdx; i++ {
+			if email, ok := emailsMap[i]; ok {
+				emails = append(emails, email)
+			}
 		}
 	}
 
