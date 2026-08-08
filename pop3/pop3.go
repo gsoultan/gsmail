@@ -20,6 +20,18 @@ type Receiver struct {
 	SSL                bool
 	InsecureSkipVerify bool
 
+	// DeleteAfterRetrieve issues DELE for each message this receiver
+	// successfully retrieves and parses, so the next poll sees only new mail.
+	//
+	// POP3 has no server-side read state: without this, every poll returns the
+	// entire mailbox again and the caller has to deduplicate forever. It is
+	// off by default because deletion is not reversible -- turn it on once you
+	// are sure the messages are durably handled on your side.
+	//
+	// Deletions are committed by QUIT. If the connection drops first the
+	// server discards them, so a failure mid-poll cannot lose mail.
+	DeleteAfterRetrieve bool
+
 	// Modern auth (POP3 XOAUTH2 is not supported by this client)
 	AuthMethod        gsmail.AuthMethod
 	TokenSource       gsmail.TokenSource
@@ -166,6 +178,8 @@ func (f *Receiver) receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 	}
 
 	emails := make([]gsmail.Email, 0, start-end+1)
+	var retrieved []int
+
 	for i := start; i >= end; i-- {
 		// Check context cancellation
 		select {
@@ -183,9 +197,20 @@ func (f *Receiver) receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 
 		email, err := gsmail.ParseRawEmail(buf.Bytes())
 		if err != nil {
+			// Leave an unparseable message on the server rather than deleting
+			// mail nobody has managed to read.
 			continue
 		}
 		emails = append(emails, email)
+		retrieved = append(retrieved, i)
+	}
+
+	// Delete only what was retrieved and parsed, and only once the whole batch
+	// has succeeded. The server commits these on QUIT.
+	if f.DeleteAfterRetrieve && len(retrieved) > 0 {
+		if err := conn.Dele(retrieved...); err != nil {
+			return emails, fmt.Errorf("pop3 dele: %w", err)
+		}
 	}
 
 	return emails, nil

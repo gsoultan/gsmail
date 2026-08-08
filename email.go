@@ -16,6 +16,19 @@ type Attachment struct {
 
 // Email represents an email message.
 type Email struct {
+	// UID identifies the message on the server it was fetched from. It is set
+	// by receivers that expose a stable identifier (IMAP) and is required by
+	// the operations that act on an existing message, such as marking it read
+	// or moving it.
+	//
+	// It is meaningless when sending and is ignored by every Sender. Zero
+	// means "not from a server, or the server does not provide one".
+	UID uint32
+
+	// Mailbox is the folder the message was fetched from. Set by receivers;
+	// ignored when sending.
+	Mailbox string
+
 	From              string
 	To                []string
 	Cc                []string
