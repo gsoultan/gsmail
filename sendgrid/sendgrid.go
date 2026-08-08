@@ -36,6 +36,7 @@ type sendgridRequest struct {
 	Subject          string            `json:"subject"`
 	Content          []content         `json:"content"`
 	Attachments      []attachment      `json:"attachments,omitempty"`
+	Headers          map[string]string `json:"headers,omitempty"`
 }
 
 type personalization struct {
@@ -63,21 +64,25 @@ type attachment struct {
 }
 
 // Send sends an email using the SendGrid API.
+//
+// A 4xx other than 408 or 429 is reported as a permanent gsmail.HTTPError and
+// is not retried; a 429 honours the server's Retry-After header.
 func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
+	reqBody, err := p.buildRequest(email)
+	if err != nil {
+		return err
+	}
+
+	// Marshal once: the payload does not change between attempts.
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return gsmail.NonRetryable(fmt.Errorf("marshal request: %w", err))
+	}
+
 	return gsmail.Retry(ctx, p.GetRetryConfig(), func() error {
-		reqBody, err := p.buildRequest(email)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/v3/mail/send", bytes.NewReader(jsonBody))
 		if err != nil {
-			return err
-		}
-
-		jsonBody, err := json.Marshal(reqBody)
-		if err != nil {
-			return fmt.Errorf("marshal request: %w", err)
-		}
-
-		req, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/v3/mail/send", bytes.NewReader(jsonBody))
-		if err != nil {
-			return fmt.Errorf("create request: %w", err)
+			return gsmail.NonRetryable(fmt.Errorf("create request: %w", err))
 		}
 
 		req.Header.Set("Authorization", "Bearer "+p.APIKey)
@@ -87,20 +92,10 @@ func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
 		if err != nil {
 			return fmt.Errorf("http execute: %w", err)
 		}
-		defer resp.Body.Close()
+		defer gsmail.DrainAndClose(resp.Body)
 
 		if resp.StatusCode >= 400 {
-			var errResp struct {
-				Errors []struct {
-					Message string `json:"message"`
-				} `json:"errors"`
-			}
-			_ = json.NewDecoder(resp.Body).Decode(&errResp)
-			errMsg := "unknown error"
-			if len(errResp.Errors) > 0 {
-				errMsg = errResp.Errors[0].Message
-			}
-			return fmt.Errorf("sendgrid error (status %d): %s", resp.StatusCode, errMsg)
+			return gsmail.NewHTTPError("sendgrid", resp)
 		}
 
 		return nil
@@ -151,15 +146,36 @@ func (p *Sender) buildRequest(email gsmail.Email) (sendgridRequest, error) {
 		})
 	}
 
+	// SendGrid rejects a request with no content at all.
+	if len(req.Content) == 0 {
+		return sendgridRequest{}, gsmail.NonRetryable(
+			fmt.Errorf("sendgrid: email has neither Body nor HTMLBody"))
+	}
+
 	for _, att := range email.Attachments {
+		// An attachment carrying a Content-ID is referenced from the HTML by
+		// cid:, so it has to be declared inline. Sending it as "attachment"
+		// leaves the image broken in the body and duplicated at the bottom.
+		disposition := "attachment"
+		if att.ContentID != "" {
+			disposition = "inline"
+		}
 		req.Attachments = append(req.Attachments, attachment{
 			Content:     base64.StdEncoding.EncodeToString(att.Data),
 			Type:        att.ContentType,
 			Filename:    att.Filename,
-			Disposition: "attachment",
+			Disposition: disposition,
 			ContentID:   att.ContentID,
 		})
 	}
+
+	// Custom headers (List-Unsubscribe, In-Reply-To, X-*). The reserved names
+	// SendGrid generates itself are filtered out, mirroring BuildMessage.
+	hdrs, err := gsmail.CustomHeaders(email.Headers)
+	if err != nil {
+		return sendgridRequest{}, err
+	}
+	req.Headers = hdrs
 
 	return req, nil
 }
@@ -183,9 +199,9 @@ func (p *Sender) Ping(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer gsmail.DrainAndClose(resp.Body)
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("sendgrid ping failed: status %d", resp.StatusCode)
+			return gsmail.NewHTTPError("sendgrid ping", resp)
 		}
 		return nil
 	})
