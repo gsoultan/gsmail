@@ -22,6 +22,8 @@ type fakePOP3 struct {
 	messages []string
 	failRetr map[int]bool
 	commands []string
+	deleted  []int
+	quit     bool
 }
 
 func startFakePOP3(t *testing.T, messages []string) *fakePOP3 {
@@ -121,7 +123,19 @@ func (s *fakePOP3) serve(conn net.Conn) {
 				out("%s", l)
 			}
 			out(".")
+		case "DELE":
+			var n int
+			if len(fields) > 1 {
+				fmt.Sscanf(fields[1], "%d", &n)
+			}
+			s.mu.Lock()
+			s.deleted = append(s.deleted, n)
+			s.mu.Unlock()
+			out("+OK marked")
 		case "QUIT":
+			s.mu.Lock()
+			s.quit = true
+			s.mu.Unlock()
 			out("+OK bye")
 			return
 		default:
@@ -309,6 +323,93 @@ var _ gsmail.Receiver = (*Receiver)(nil)
 func contains(haystack []string, needle string) bool {
 	for _, s := range haystack {
 		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *fakePOP3) deletedIDs() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.deleted...)
+}
+
+// Without DELE, every poll returns the whole mailbox again and the caller has
+// to deduplicate forever.
+func TestDeleteAfterRetrieve(t *testing.T) {
+	s := startFakePOP3(t, []string{msg("a", "1"), msg("b", "2"), msg("c", "3")})
+	f := s.receiver(t)
+	f.DeleteAfterRetrieve = true
+
+	emails, err := f.Receive(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	if len(emails) != 3 {
+		t.Fatalf("got %d emails, want 3", len(emails))
+	}
+
+	deleted := s.deletedIDs()
+	if len(deleted) != 3 {
+		t.Fatalf("deleted %v, want all three messages", deleted)
+	}
+	for _, want := range []int{1, 2, 3} {
+		if !containsInt(deleted, want) {
+			t.Errorf("message %d was retrieved but not deleted", want)
+		}
+	}
+}
+
+func TestDeleteAfterRetrieveIsOptOut(t *testing.T) {
+	s := startFakePOP3(t, []string{msg("a", "1")})
+
+	if _, err := s.receiver(t).Receive(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.deletedIDs(); len(got) != 0 {
+		t.Errorf("deleted %v with DeleteAfterRetrieve unset; deletion must be opt-in", got)
+	}
+}
+
+// A message nobody managed to parse must stay on the server. Deleting mail
+// that was never successfully read loses it permanently.
+func TestUnparseableMessageIsNotDeleted(t *testing.T) {
+	s := startFakePOP3(t, []string{msg("good", "1"), "\x00\x00 not a message \x00"})
+	f := s.receiver(t)
+	f.DeleteAfterRetrieve = true
+
+	if _, err := f.Receive(context.Background(), 10); err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+
+	deleted := s.deletedIDs()
+	if containsInt(deleted, 2) {
+		t.Error("the unparseable message was deleted despite never being read")
+	}
+}
+
+// A RETR failure must abort before anything is deleted.
+func TestNothingIsDeletedWhenRetrFails(t *testing.T) {
+	s := startFakePOP3(t, []string{msg("a", "1"), msg("b", "2")})
+	s.mu.Lock()
+	s.failRetr[1] = true
+	s.mu.Unlock()
+
+	f := s.receiver(t)
+	f.DeleteAfterRetrieve = true
+
+	if _, err := f.Receive(context.Background(), 10); err == nil {
+		t.Fatal("expected the RETR failure to surface")
+	}
+	if got := s.deletedIDs(); len(got) != 0 {
+		t.Errorf("deleted %v after a failed batch; deletion must not be partial", got)
+	}
+}
+
+func containsInt(haystack []int, needle int) bool {
+	for _, v := range haystack {
+		if v == needle {
 			return true
 		}
 	}

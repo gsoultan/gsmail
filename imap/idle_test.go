@@ -20,9 +20,39 @@ import (
 type fakeIMAP struct {
 	addr string
 
-	mu       sync.Mutex
-	conns    int
-	idleStop chan struct{} // closed when the server sees DONE
+	mu           sync.Mutex
+	conns        int
+	idleStop     chan struct{} // closed when the server sees DONE
+	commands     []string      // every command verb the server saw
+	selected     []string      // mailboxes SELECTed
+	supportsMove bool
+}
+
+func (s *fakeIMAP) record(cmd string) {
+	s.mu.Lock()
+	s.commands = append(s.commands, cmd)
+	s.mu.Unlock()
+}
+
+func (s *fakeIMAP) seen() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.commands...)
+}
+
+func (s *fakeIMAP) selectedMailboxes() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.selected...)
+}
+
+func (s *fakeIMAP) sawCommand(prefix string) bool {
+	for _, c := range s.seen() {
+		if strings.HasPrefix(c, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func startFakeIMAP(t *testing.T) *fakeIMAP {
@@ -100,14 +130,27 @@ func (s *fakeIMAP) serve(conn net.Conn) {
 			continue
 		}
 		tag, cmd := parts[0], strings.ToUpper(parts[1])
+		s.record(strings.ToUpper(line[len(tag)+1:]))
 
 		switch cmd {
 		case "CAPABILITY":
-			out("* CAPABILITY IMAP4rev1 IDLE")
+			s.mu.Lock()
+			move := s.supportsMove
+			s.mu.Unlock()
+			if move {
+				out("* CAPABILITY IMAP4rev1 IDLE MOVE")
+			} else {
+				out("* CAPABILITY IMAP4rev1 IDLE")
+			}
 			out("%s OK CAPABILITY done", tag)
 		case "LOGIN":
 			out("%s OK LOGIN done", tag)
 		case "SELECT":
+			if len(parts) > 2 {
+				s.mu.Lock()
+				s.selected = append(s.selected, strings.Trim(parts[2], `"`))
+				s.mu.Unlock()
+			}
 			out("* 1 EXISTS")
 			out("* 0 RECENT")
 			out("* FLAGS (\\Seen)")
@@ -126,15 +169,40 @@ func (s *fakeIMAP) serve(conn net.Conn) {
 					time.Sleep(time.Millisecond)
 				}
 			}()
-		case "SEARCH", "UID":
+		case "SEARCH":
 			out("* SEARCH 1")
 			out("%s OK SEARCH done", tag)
+		case "UID":
+			sub := ""
+			if len(parts) > 2 {
+				sub = strings.ToUpper(strings.Fields(parts[2])[0])
+			}
+			switch sub {
+			case "SEARCH":
+				out("* SEARCH 1")
+				out("%s OK UID SEARCH done", tag)
+			case "FETCH":
+				body := "From: a@example.com\r\nTo: b@example.com\r\nSubject: hi\r\n\r\nbody\r\n"
+				out("* 1 FETCH (UID 101 RFC822 {%d}", len(body))
+				raw(body)
+				out(")")
+				out("%s OK UID FETCH done", tag)
+			default:
+				out("%s OK UID %s done", tag, sub)
+			}
 		case "FETCH":
 			body := "From: a@example.com\r\nTo: b@example.com\r\nSubject: hi\r\n\r\nbody\r\n"
-			out("* 1 FETCH (RFC822 {%d}", len(body))
+			out("* 1 FETCH (UID 101 RFC822 {%d}", len(body))
 			raw(body)
 			out(")")
 			out("%s OK FETCH done", tag)
+		case "STORE", "EXPUNGE", "COPY", "MOVE":
+			out("%s OK %s done", tag, cmd)
+		case "LIST":
+			out(`* LIST (\HasNoChildren) "/" "INBOX"`)
+			out(`* LIST (\HasNoChildren) "/" "Archive"`)
+			out(`* LIST (\HasNoChildren) "/" "Work/Reports"`)
+			out("%s OK LIST done", tag)
 		case "LOGOUT":
 			out("* BYE logging out")
 			out("%s OK LOGOUT done", tag)

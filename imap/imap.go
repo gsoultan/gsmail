@@ -26,6 +26,12 @@ type Receiver struct {
 	SSL                bool
 	InsecureSkipVerify bool
 
+	// Mailbox is the folder to read. Empty means INBOX.
+	//
+	// This used to be hardcoded, so the package could only ever see INBOX --
+	// no Archive, no label, no shared folder.
+	Mailbox string
+
 	// Modern auth
 	AuthMethod        gsmail.AuthMethod
 	TokenSource       gsmail.TokenSource
@@ -93,6 +99,14 @@ func (f *Receiver) tlsConfig() *tls.Config {
 		CipherSuites:       f.CipherSuites,
 		InsecureSkipVerify: f.InsecureSkipVerify,
 	}
+}
+
+// mailbox returns the folder to operate on, defaulting to INBOX.
+func (f *Receiver) mailbox() string {
+	if f.Mailbox != "" {
+		return f.Mailbox
+	}
+	return "INBOX"
 }
 
 // Ping checks the connection to the IMAP server.
@@ -204,9 +218,9 @@ func (f *Receiver) Receive(ctx context.Context, limit int) ([]gsmail.Email, erro
 			return err
 		}
 
-		mbox, err := c.Select("INBOX", false)
+		mbox, err := c.Select(f.mailbox(), false)
 		if err != nil {
-			return fmt.Errorf("imap select inbox: %w", err)
+			return fmt.Errorf("imap select %q: %w", f.mailbox(), err)
 		}
 
 		if mbox.Messages == 0 {
@@ -248,8 +262,8 @@ func (f *Receiver) Search(ctx context.Context, options gsmail.SearchOptions, lim
 			return err
 		}
 
-		if _, err := c.Select("INBOX", false); err != nil {
-			return fmt.Errorf("imap select inbox: %w", err)
+		if _, err := c.Select(f.mailbox(), false); err != nil {
+			return fmt.Errorf("imap select %q: %w", f.mailbox(), err)
 		}
 
 		criteria := goimap.NewSearchCriteria()
@@ -314,7 +328,7 @@ func (f *Receiver) Idle(ctx context.Context) (<-chan gsmail.Email, <-chan error)
 			return
 		}
 
-		if _, err := c.Select("INBOX", false); err != nil {
+		if _, err := c.Select(f.mailbox(), false); err != nil {
 			errChan <- err
 			return
 		}
@@ -447,7 +461,7 @@ func (f *Receiver) fetch(ctx context.Context, c *client.Client, seqset *goimap.S
 	done := make(chan error, 1)
 	fetchMessages := make(chan *goimap.Message, limit)
 	go func() {
-		done <- c.Fetch(seqset, []goimap.FetchItem{goimap.FetchRFC822}, fetchMessages)
+		done <- c.Fetch(seqset, []goimap.FetchItem{goimap.FetchRFC822, goimap.FetchUid}, fetchMessages)
 	}()
 
 	// c.Fetch is not context-aware, and an IMAP connection carries one command
@@ -533,6 +547,10 @@ func (f *Receiver) fetch(ctx context.Context, c *client.Client, seqset *goimap.S
 					if err != nil {
 						continue
 					}
+					// Carry the server-side identity through, so the caller can
+					// mark, move or delete the message afterwards.
+					email.UID = m.Uid
+					email.Mailbox = f.mailbox()
 					results <- result{index: res.idx, email: email}
 				}
 			}
