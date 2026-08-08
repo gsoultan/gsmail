@@ -8,6 +8,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the module is at `v0`, breaking changes ship in minor releases. Read the
 **Breaking** section before upgrading.
 
+## [Unreleased]
+
+### Fixed
+
+- **`ParseRawEmail` returned values containing control characters.** A
+  malformed header carries them straight through: `net/mail` accepts
+  `"To:0\r0"`, and the address came back with the bare CR intact. Once such a
+  value is inside an `Email` it goes wherever the caller takes it — a log line,
+  a datastore, a reply built by a different mailer. `FormatAddress` refused it
+  on the way out, but relying on every consumer to re-check is how one of them
+  eventually does not. `From`, `Subject`, `ReplyTo` and the parsed address
+  lists are now sanitised at the parse boundary, and an address carrying a
+  control character is dropped rather than stripped: turning `0\r0` into `00`
+  would fabricate a plausible-looking address nobody wrote.
+
+- **`ParseEmailAddress` returned an address containing a newline.** Its lenient
+  fallback — which exists for real headers `net/mail` will not accept, such as
+  an unquoted comma in a display name — handed back whatever sat between the
+  angle brackets, so `<0\n0>` produced an address with a line break. That value
+  reaches `client.Mail` on the SMTP path; `net/smtp` happens to reject CR and
+  LF in a command argument, but relying on a downstream library to catch a
+  value this one produced is not a defence. Illegal characters are now rejected
+  with `ErrIllegalAddress`.
+
+### Added
+
+- **Fuzz targets for every parser and HTML builder** (`fuzz_test.go`,
+  `outlook/fuzz_test.go`), and a CI job that runs them on each push.
+
+  They assert invariants rather than the absence of a panic: no header-derived
+  value may carry a control character, no rendered message may contain a
+  header the caller did not set, and untrusted input passed to an `MSO*`
+  builder may contribute text but never markup structure. Both bugs above were
+  found within seconds of the first target existing.
+
+  Crashing inputs are committed under `testdata/fuzz/`, so each becomes a
+  permanent regression case. `go test ./...` replays every seed and every
+  committed crasher, so regression protection costs nothing on each push;
+  discovery — which wants minutes per target — runs nightly in its own
+  workflow rather than blocking a pull request.
+
 ## [v0.8.0]
 
 ### Breaking

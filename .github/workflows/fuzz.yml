@@ -1,0 +1,60 @@
+name: fuzz
+
+# Regression protection is already free: `go test ./...` replays every seed and
+# every crasher committed under testdata/fuzz, so the build job covers it on
+# each push. This workflow exists for the other half of fuzzing -- finding
+# inputs nobody has thought of -- which wants minutes per target, not seconds,
+# and has no business blocking a pull request.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Time budget per target"
+        required: false
+        default: "5m"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [".", "./outlook"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Fuzz every target in ${{ matrix.package }}
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '5m' }}
+        run: |
+          set -euo pipefail
+          # go test accepts one -fuzz target per run, so iterate.
+          for target in $(go test "${{ matrix.package }}" -list 'Fuzz.*' | grep '^Fuzz'); do
+            echo "::group::$target"
+            go test "${{ matrix.package }}" -run '^$' -fuzz "^${target}$" -fuzztime="$FUZZTIME"
+            echo "::endgroup::"
+          done
+
+      - name: Upload any crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers-${{ strategy.job-index }}
+          path: |
+            **/testdata/fuzz/**
+          if-no-files-found: ignore
