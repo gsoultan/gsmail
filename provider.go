@@ -260,3 +260,20 @@ func Retry(ctx context.Context, config RetryConfig, fn func() error) error {
 
 	return lastErr
 }
+
+// ErrEnvelopeUnsupported is returned by providers that cannot separate the
+// envelope recipients from the address headers.
+//
+// Silently ignoring Email.Envelope would be worse than refusing it: a caller
+// setting it is rendering one copy per recipient, so delivering to everyone
+// named in To and Cc instead would send each of them a copy per recipient.
+var ErrEnvelopeUnsupported = errors.New("gsmail: this provider cannot deliver to an explicit envelope; the recipient list is derived from To, Cc and Bcc")
+
+// RejectEnvelope reports the error a provider should return when a message sets
+// Email.Envelope and the transport cannot honour it.
+func RejectEnvelope(provider string, email Email) error {
+	if len(email.Envelope) == 0 {
+		return nil
+	}
+	return NonRetryable(fmt.Errorf("%s: %w", provider, ErrEnvelopeUnsupported))
+}
