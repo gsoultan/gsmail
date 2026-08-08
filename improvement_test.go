@@ -69,10 +69,12 @@ func TestImprovementHeaders(t *testing.T) {
 		Body:    []byte("Plain Text Body"),
 	}
 
-	bufPtr := GetBuffer()
-	defer PutBuffer(bufPtr)
+	bufPtr := getBuffer()
+	defer putBuffer(bufPtr)
 
-	BuildMessage(bufPtr, email)
+	if err := BuildMessage(bufPtr, email); err != nil {
+		t.Fatalf("BuildMessage: %v", err)
+	}
 	msg := string(*bufPtr)
 
 	headers := []string{
@@ -110,10 +112,12 @@ func TestImprovementUnicodeBodyEncoding(t *testing.T) {
 		Body:    []byte("<html><body>Reminder ⏰ 世界</body></html>"),
 	}
 
-	bufPtr := GetBuffer()
-	defer PutBuffer(bufPtr)
+	bufPtr := getBuffer()
+	defer putBuffer(bufPtr)
 
-	BuildMessage(bufPtr, email)
+	if err := BuildMessage(bufPtr, email); err != nil {
+		t.Fatalf("BuildMessage: %v", err)
+	}
 	msg := string(*bufPtr)
 
 	if !strings.Contains(msg, "Content-Transfer-Encoding: base64") {
@@ -132,10 +136,12 @@ func TestImprovementSubjectEncoding(t *testing.T) {
 		Body:    []byte("Plain Text Body"),
 	}
 
-	bufPtr := GetBuffer()
-	defer PutBuffer(bufPtr)
+	bufPtr := getBuffer()
+	defer putBuffer(bufPtr)
 
-	BuildMessage(bufPtr, email)
+	if err := BuildMessage(bufPtr, email); err != nil {
+		t.Fatalf("BuildMessage: %v", err)
+	}
 	msg := string(*bufPtr)
 
 	expectedSubject := "Subject: =?UTF-8?q?Hello_=E4=B8=96=E7=95=8C?="
@@ -153,10 +159,12 @@ func TestImprovementMultipartAlternative(t *testing.T) {
 		HTMLBody: []byte("<p>HTML Body</p>"),
 	}
 
-	bufPtr := GetBuffer()
-	defer PutBuffer(bufPtr)
+	bufPtr := getBuffer()
+	defer putBuffer(bufPtr)
 
-	BuildMessage(bufPtr, email)
+	if err := BuildMessage(bufPtr, email); err != nil {
+		t.Fatalf("BuildMessage: %v", err)
+	}
 	msg := string(*bufPtr)
 
 	if !strings.Contains(msg, "Content-Type: multipart/alternative") {
@@ -190,10 +198,12 @@ func TestImprovementInlineAttachment(t *testing.T) {
 		},
 	}
 
-	bufPtr := GetBuffer()
-	defer PutBuffer(bufPtr)
+	bufPtr := getBuffer()
+	defer putBuffer(bufPtr)
 
-	BuildMessage(bufPtr, email)
+	if err := BuildMessage(bufPtr, email); err != nil {
+		t.Fatalf("BuildMessage: %v", err)
+	}
 	msg := string(*bufPtr)
 
 	if !strings.Contains(strings.ToLower(msg), strings.ToLower("Content-ID: <logo123>")) {
@@ -254,10 +264,12 @@ func TestImprovementSimpleBase64BodyIsWrappedAt76Chars(t *testing.T) {
 		Body:    []byte(strings.Repeat("A", 120)),
 	}
 
-	bufPtr := GetBuffer()
-	defer PutBuffer(bufPtr)
+	bufPtr := getBuffer()
+	defer putBuffer(bufPtr)
 
-	BuildMessage(bufPtr, email)
+	if err := BuildMessage(bufPtr, email); err != nil {
+		t.Fatalf("BuildMessage: %v", err)
+	}
 	payloads := extractBase64PayloadLines(string(*bufPtr))
 
 	if len(payloads) != 1 {
@@ -276,10 +288,12 @@ func TestImprovementMultipartAlternativeBase64BodiesAreWrappedAt76Chars(t *testi
 		HTMLBody: []byte("<p>" + strings.Repeat("H", 120) + "</p>"),
 	}
 
-	bufPtr := GetBuffer()
-	defer PutBuffer(bufPtr)
+	bufPtr := getBuffer()
+	defer putBuffer(bufPtr)
 
-	BuildMessage(bufPtr, email)
+	if err := BuildMessage(bufPtr, email); err != nil {
+		t.Fatalf("BuildMessage: %v", err)
+	}
 	payloads := extractBase64PayloadLines(string(*bufPtr))
 
 	if len(payloads) != 2 {
@@ -306,10 +320,12 @@ func TestImprovementAttachmentBase64IsWrappedAt76Chars(t *testing.T) {
 		},
 	}
 
-	bufPtr := GetBuffer()
-	defer PutBuffer(bufPtr)
+	bufPtr := getBuffer()
+	defer putBuffer(bufPtr)
 
-	BuildMessage(bufPtr, email)
+	if err := BuildMessage(bufPtr, email); err != nil {
+		t.Fatalf("BuildMessage: %v", err)
+	}
 	payloads := extractBase64PayloadLines(string(*bufPtr))
 
 	if len(payloads) != 2 {

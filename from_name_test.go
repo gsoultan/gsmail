@@ -45,13 +45,13 @@ func TestFromNameInBuildMessage(t *testing.T) {
 				Body:    []byte("Test Body"),
 			}
 
-			bufPtr := gsmail.GetBuffer()
-			defer gsmail.PutBuffer(bufPtr)
+			raw, err := gsmail.RenderMessage(email)
+			if err != nil {
+				t.Fatalf("RenderMessage: %v", err)
+			}
+			message := string(raw)
 
-			gsmail.BuildMessage(bufPtr, email)
-			message := string(*bufPtr)
-
-			msg, err := mail.ReadMessage(bytes.NewReader(*bufPtr))
+			msg, err := mail.ReadMessage(bytes.NewReader(raw))
 			if err != nil {
 				t.Fatalf("Failed to read message: %v", err)
 			}

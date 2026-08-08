@@ -2,6 +2,7 @@ package gsmail
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -26,8 +27,42 @@ type DomainHealth struct {
 	MX     HealthResult            `json:"mx"`
 }
 
+// HealthChecker performs DNS-based domain health checks. The zero value is
+// ready to use and resolves through net.DefaultResolver.
+type HealthChecker struct {
+	// Resolver performs the DNS lookups. Defaults to net.DefaultResolver.
+	Resolver Resolver
+}
+
+func (h HealthChecker) resolver() Resolver {
+	if h.Resolver != nil {
+		return h.Resolver
+	}
+	return net.DefaultResolver
+}
+
 // CheckDomainHealth performs comprehensive DNS health checks for the given domain.
 func CheckDomainHealth(ctx context.Context, domain string, selectors []string) (DomainHealth, error) {
+	return HealthChecker{}.CheckDomainHealth(ctx, domain, selectors)
+}
+
+// CheckSPF retrieves and validates the SPF record for a domain.
+func CheckSPF(ctx context.Context, domain string) HealthResult {
+	return HealthChecker{}.CheckSPF(ctx, domain)
+}
+
+// CheckDMARC retrieves and validates the DMARC record for a domain.
+func CheckDMARC(ctx context.Context, domain string) HealthResult {
+	return HealthChecker{}.CheckDMARC(ctx, domain)
+}
+
+// CheckDKIM retrieves and validates a DKIM record for a domain and selector.
+func CheckDKIM(ctx context.Context, domain, selector string) HealthResult {
+	return HealthChecker{}.CheckDKIM(ctx, domain, selector)
+}
+
+// CheckDomainHealth performs comprehensive DNS health checks for the given domain.
+func (h HealthChecker) CheckDomainHealth(ctx context.Context, domain string, selectors []string) (DomainHealth, error) {
 	if domain == "" {
 		return DomainHealth{}, fmt.Errorf("domain is required")
 	}
@@ -50,7 +85,7 @@ func CheckDomainHealth(ctx context.Context, domain string, selectors []string) (
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		mxs, err := lookupMX(ctx, domain)
+		mxs, err := h.resolver().LookupMX(ctx, domain)
 		res := HealthResult{}
 		if err != nil {
 			res.Error = err.Error()
@@ -75,7 +110,7 @@ func CheckDomainHealth(ctx context.Context, domain string, selectors []string) (
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		res := CheckSPF(ctx, domain)
+		res := h.CheckSPF(ctx, domain)
 		select {
 		case resChan <- result{typ: "spf", res: res}:
 		case <-ctx.Done():
@@ -86,7 +121,7 @@ func CheckDomainHealth(ctx context.Context, domain string, selectors []string) (
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		res := CheckDMARC(ctx, domain)
+		res := h.CheckDMARC(ctx, domain)
 		select {
 		case resChan <- result{typ: "dmarc", res: res}:
 		case <-ctx.Done():
@@ -98,7 +133,7 @@ func CheckDomainHealth(ctx context.Context, domain string, selectors []string) (
 		wg.Add(1)
 		go func(s string) {
 			defer wg.Done()
-			res := CheckDKIM(ctx, domain, s)
+			res := h.CheckDKIM(ctx, domain, s)
 			select {
 			case resChan <- result{typ: "dkim", selector: s, res: res}:
 			case <-ctx.Done():
@@ -136,8 +171,8 @@ func CheckDomainHealth(ctx context.Context, domain string, selectors []string) (
 }
 
 // CheckSPF retrieves and validates the SPF record for a domain.
-func CheckSPF(ctx context.Context, domain string) HealthResult {
-	txts, err := lookupTXT(ctx, domain)
+func (h HealthChecker) CheckSPF(ctx context.Context, domain string) HealthResult {
+	txts, err := h.resolver().LookupTXT(ctx, domain)
 	if err != nil {
 		// Ignore "no such host" or similar as just "not found"
 		if isNotFound(err) {
@@ -175,9 +210,9 @@ func CheckSPF(ctx context.Context, domain string) HealthResult {
 }
 
 // CheckDMARC retrieves and validates the DMARC record for a domain.
-func CheckDMARC(ctx context.Context, domain string) HealthResult {
+func (h HealthChecker) CheckDMARC(ctx context.Context, domain string) HealthResult {
 	dmarcDomain := "_dmarc." + domain
-	txts, err := lookupTXT(ctx, dmarcDomain)
+	txts, err := h.resolver().LookupTXT(ctx, dmarcDomain)
 	if err != nil {
 		if isNotFound(err) {
 			return HealthResult{Found: false, Details: "No DMARC record found"}
@@ -213,13 +248,13 @@ func CheckDMARC(ctx context.Context, domain string) HealthResult {
 }
 
 // CheckDKIM retrieves and validates a DKIM record for a domain and selector.
-func CheckDKIM(ctx context.Context, domain, selector string) HealthResult {
+func (h HealthChecker) CheckDKIM(ctx context.Context, domain, selector string) HealthResult {
 	if selector == "" {
 		return HealthResult{Error: "Selector is required for DKIM check"}
 	}
 
 	dkimDomain := selector + "._domainkey." + domain
-	txts, err := lookupTXT(ctx, dkimDomain)
+	txts, err := h.resolver().LookupTXT(ctx, dkimDomain)
 	if err != nil {
 		if isNotFound(err) {
 			return HealthResult{Found: false, Details: "No DKIM record found for selector " + selector}
@@ -275,9 +310,6 @@ func CheckDKIM(ctx context.Context, domain, selector string) HealthResult {
 }
 
 func isNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	dnsErr, ok := err.(*net.DNSError)
-	return ok && dnsErr.IsNotFound
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
 }

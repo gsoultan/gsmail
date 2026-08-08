@@ -28,12 +28,10 @@ func TestAttachmentSendingAndReceiving(t *testing.T) {
 	}
 
 	// 1. Test Building the message (SMTP/SES raw)
-	bufPtr := gsmail.GetBuffer()
-	defer gsmail.PutBuffer(bufPtr)
-
-	gsmail.BuildMessage(bufPtr, email)
-
-	raw := *bufPtr
+	raw, err := gsmail.RenderMessage(email)
+	if err != nil {
+		t.Fatalf("RenderMessage: %v", err)
+	}
 	if len(raw) == 0 {
 		t.Fatal("built message is empty")
 	}
@@ -96,9 +94,10 @@ func BenchmarkParseRawEmailMultipart(b *testing.B) {
 			{Filename: "b.txt", Data: []byte("More data")},
 		},
 	}
-	bufPtr := gsmail.GetBuffer()
-	gsmail.BuildMessage(bufPtr, email)
-	raw := *bufPtr
+	raw, err := gsmail.RenderMessage(email)
+	if err != nil {
+		b.Fatalf("RenderMessage: %v", err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
