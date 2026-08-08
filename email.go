@@ -4,6 +4,8 @@ import (
 	"fmt"
 	htmltemplate "html/template"
 	"text/template"
+
+	"github.com/gsoultan/gsmail/outlook"
 )
 
 // Attachment represents an email attachment.
@@ -93,7 +95,7 @@ func (e *Email) SetHTMLBody(tmplStr string, data any) error {
 		return fmt.Errorf("set html body: %w", err)
 	}
 	if e.OutlookCompatible {
-		body = ToOutlookHTML(body)
+		body = outlook.ToOutlookHTML(body)
 	}
 	e.HTMLBody = body
 	return nil
@@ -111,7 +113,7 @@ func (e *Email) IsOutlookCompatible() bool {
 	if e.OutlookCompatible {
 		return true
 	}
-	return IsOutlookCompatible(e.Body) || IsOutlookCompatible(e.HTMLBody)
+	return outlook.IsOutlookCompatible(e.Body) || outlook.IsOutlookCompatible(e.HTMLBody)
 }
 
 func (e *Email) setBodyBytes(b []byte, data any) error {

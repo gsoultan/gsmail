@@ -12,6 +12,11 @@ import (
 )
 
 // Sender represents the Mailgun provider and implements the Sender interface.
+//
+// A Sender is safe for concurrent use, but its fields are not: they are read
+// on every Send, so changing one while a send is in flight is a data race.
+// Configure it fully before first use. SetRetryConfig is the exception and may
+// be called at any time.
 type Sender struct {
 	gsmail.BaseProvider
 	Domain  string
@@ -99,16 +104,13 @@ func buildForm(email gsmail.Email) ([]byte, string, error) {
 		_ = writer.WriteField("h:"+name, value)
 	}
 
-	if len(email.Body) > 0 && !gsmail.IsHTML(email.Body) {
+	// Body is text/plain and HTMLBody is text/html. Sniffing Body for markup
+	// misread ordinary prose containing an angle bracket.
+	if len(email.Body) > 0 {
 		_ = writer.WriteField("text", string(email.Body))
 	}
-
-	htmlBody := email.HTMLBody
-	if len(htmlBody) == 0 && gsmail.IsHTML(email.Body) {
-		htmlBody = email.Body
-	}
-	if len(htmlBody) > 0 {
-		_ = writer.WriteField("html", string(htmlBody))
+	if len(email.HTMLBody) > 0 {
+		_ = writer.WriteField("html", string(email.HTMLBody))
 	}
 
 	for _, att := range email.Attachments {

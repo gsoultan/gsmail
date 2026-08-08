@@ -13,6 +13,11 @@ import (
 )
 
 // Sender represents the SendGrid provider and implements the Sender interface.
+//
+// A Sender is safe for concurrent use, but its fields are not: they are read
+// on every Send, so changing one while a send is in flight is a data race.
+// Configure it fully before first use. SetRetryConfig is the exception and may
+// be called at any time.
 type Sender struct {
 	gsmail.BaseProvider
 	APIKey  string
@@ -125,24 +130,23 @@ func (p *Sender) buildRequest(email gsmail.Email) (sendgridRequest, error) {
 	}
 	req.Personalizations = []personalization{pers}
 
-	// Plain text body
-	if len(email.Body) > 0 && !gsmail.IsHTML(email.Body) {
+	// Body is text/plain and HTMLBody is text/html, as the field names say.
+	// This used to sniff Body for markup, which misread ordinary prose --
+	// "Please review <p1> pricing" was sent as HTML and the recipient's
+	// renderer ate the word. SetBody routes HTML to HTMLBody, so there is
+	// nothing left for sniffing to discover.
+	//
+	// SendGrid requires text/plain before text/html.
+	if len(email.Body) > 0 {
 		req.Content = append(req.Content, content{
 			Type:  "text/plain",
 			Value: string(email.Body),
 		})
 	}
-
-	// HTML body
-	htmlBody := email.HTMLBody
-	if len(htmlBody) == 0 && gsmail.IsHTML(email.Body) {
-		htmlBody = email.Body
-	}
-
-	if len(htmlBody) > 0 {
+	if len(email.HTMLBody) > 0 {
 		req.Content = append(req.Content, content{
 			Type:  "text/html",
-			Value: string(htmlBody),
+			Value: string(email.HTMLBody),
 		})
 	}
 

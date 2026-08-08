@@ -11,6 +11,10 @@ import (
 )
 
 // Receiver represents the POP3 server configuration and implements the Receiver interface.
+//
+// A Receiver is safe for concurrent use, but its fields are not: they are read
+// on every operation, so changing one while an operation is in flight is a
+// data race. Configure it fully before first use.
 type Receiver struct {
 	gsmail.BaseProvider
 	Host               string

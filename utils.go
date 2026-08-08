@@ -114,9 +114,9 @@ func (w *bufferWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// HasHeader checks if the given byte slice contains the specified header.
-// It searches only within the header section (before the first double newline).
-func HasHeader(b []byte, header string) bool {
+// hasHeader reports whether b contains the given header, searching only the
+// header section (before the first double newline).
+func hasHeader(b []byte, header string) bool {
 	if header == "" {
 		return false
 	}
@@ -496,16 +496,6 @@ func (v *Validator) probe(ctx context.Context, addr, email string) error {
 	return nil
 }
 
-// ValidateEmailExistence checks whether the mailbox appears to exist by doing
-// an MX lookup followed by an SMTP RCPT probe.
-//
-// Deprecated: use Validator directly. Callback verification is unreliable and
-// can get the sending host blocklisted; see Validator.CheckMailbox.
-func ValidateEmailExistence(ctx context.Context, email string) error {
-	v := Validator{CheckMX: true, CheckMailbox: true}
-	return v.Validate(ctx, email)
-}
-
 // ValidateEmailSyntax performs the offline checks only: syntax and the
 // built-in disposable domain list. It never touches the network.
 func ValidateEmailSyntax(email string) error {
@@ -882,7 +872,7 @@ func encodeHeader(s string) string {
 	return s
 }
 
-// reservedHeaders are produced by BuildMessage itself. Supplying them through
+// reservedHeaders are produced by buildMessage itself. Supplying them through
 // Email.Headers would duplicate or corrupt the generated message.
 var reservedHeaders = map[string]struct{}{
 	"from":                      {},
@@ -901,12 +891,12 @@ var reservedHeaders = map[string]struct{}{
 // and RFC 2047 encoded.
 //
 // Providers that construct a message through a vendor API instead of through
-// BuildMessage use this so Email.Headers means the same thing on every
+// buildMessage use this so Email.Headers means the same thing on every
 // transport. Without it, List-Unsubscribe — which Gmail and Yahoo require from
 // bulk senders — is silently lost on the API providers while working fine over
 // SMTP.
 //
-// It reports the same error BuildMessage would for an illegal header name,
+// It reports the same error buildMessage would for an illegal header name,
 // rather than quietly skipping it, so a mistake surfaces on every transport.
 func CustomHeaders(h map[string]string) (map[string]string, error) {
 	if len(h) == 0 {
@@ -1096,7 +1086,7 @@ func writeMIMEBase64(w io.Writer, b []byte) error {
 	return enc.Close()
 }
 
-// ErrConflictingContentType is returned by BuildMessage when the caller has
+// ErrConflictingContentType is returned when rendering a message and the caller has
 // already written a Content-Type header but the message needs a multipart
 // container. Emitting the body anyway would produce an unparseable message.
 var ErrConflictingContentType = errors.New("gsmail: Content-Type already set but a multipart body is required")
@@ -1109,7 +1099,7 @@ var ErrConflictingContentType = errors.New("gsmail: Content-Type already set but
 // additional headers.
 func RenderMessage(email Email) ([]byte, error) {
 	buf := make([]byte, 0, 4096)
-	if err := BuildMessage(&buf, email); err != nil {
+	if err := buildMessage(&buf, email); err != nil {
 		return nil, err
 	}
 	return buf, nil
@@ -1122,15 +1112,20 @@ func WithMessage(email Email, fn func(msg []byte) error) error {
 	bufPtr := getBuffer()
 	defer putBuffer(bufPtr)
 
-	if err := BuildMessage(bufPtr, email); err != nil {
+	if err := buildMessage(bufPtr, email); err != nil {
 		return err
 	}
 	return fn(*bufPtr)
 }
 
-// BuildMessage builds the full RFC 5322 email message into the provided
+// buildMessage builds the full RFC 5322 email message into the provided
 // buffer. See RenderMessage for the sanitisation guarantees.
-func BuildMessage(bufPtr *[]byte, email Email) error {
+//
+// It is unexported: the *[]byte parameter exists so a pooled buffer can be
+// reused, which is an implementation detail rather than an API. RenderMessage
+// and WithMessage express the two things a caller actually wants -- a message
+// they keep, and a message they only read.
+func buildMessage(bufPtr *[]byte, email Email) error {
 	writer := newBufferWriter(bufPtr)
 	var werr error
 
@@ -1148,7 +1143,7 @@ func BuildMessage(bufPtr *[]byte, email Email) error {
 		if prefixLen == 0 {
 			return false
 		}
-		return HasHeader((*bufPtr)[:prefixLen], key)
+		return hasHeader((*bufPtr)[:prefixLen], key)
 	}
 
 	write := func(s string) {

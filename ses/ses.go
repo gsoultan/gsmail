@@ -14,6 +14,11 @@ import (
 )
 
 // Sender represents the AWS SES configuration and implements the Sender interface.
+//
+// A Sender is safe for concurrent use, but its fields are not: they are read
+// on every Send, so changing one while a send is in flight is a data race.
+// Configure it fully before first use. SetRetryConfig is the exception and may
+// be called at any time.
 type Sender struct {
 	gsmail.BaseProvider
 	Region    string
@@ -138,17 +143,14 @@ func (p *Sender) sendSimple(ctx context.Context, email gsmail.Email) error {
 		Body:    &types.Body{},
 	}
 
-	body := email.Body
-	if len(body) == 0 && len(email.HTMLBody) > 0 {
-		body = email.HTMLBody
+	// Body is text/plain and HTMLBody is text/html, as the field names say.
+	// This used to sniff for markup, which misread ordinary prose containing
+	// an angle bracket and sent it as HTML.
+	if len(email.Body) > 0 {
+		input.Content.Simple.Body.Text = &types.Content{Data: aws.String(string(email.Body))}
 	}
-	// SES holds on to the request while it signs and serialises it, so the
-	// body must be a string that outlives this call rather than a view onto a
-	// pooled buffer.
-	if gsmail.IsHTML(body) {
-		input.Content.Simple.Body.Html = &types.Content{Data: aws.String(string(body))}
-	} else {
-		input.Content.Simple.Body.Text = &types.Content{Data: aws.String(string(body))}
+	if len(email.HTMLBody) > 0 {
+		input.Content.Simple.Body.Html = &types.Content{Data: aws.String(string(email.HTMLBody))}
 	}
 
 	return p.send(ctx, input)

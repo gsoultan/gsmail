@@ -26,6 +26,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -179,6 +180,7 @@ func Run(t *testing.T, h Harness) {
 
 	t.Run("DeliversBasicMessage", func(t *testing.T) { testBasic(t, h) })
 	t.Run("DeliversAllRecipients", func(t *testing.T) { testRecipients(t, h) })
+	t.Run("RoutesBodiesByField", func(t *testing.T) { testBodyRouting(t, h) })
 
 	if !h.SkipHeaderChecks {
 		t.Run("ForwardsCustomHeaders", func(t *testing.T) { testCustomHeaders(t, h) })
@@ -253,6 +255,41 @@ func assertRecipients(t *testing.T, got Sent) {
 // API-backed provider in this module dropped it at some point.
 func testCustomHeaders(t *testing.T, h Harness) {
 	assertCustomHeaders(t, h.capture(t, customHeaderEmail()))
+}
+
+// bodyRoutingEmail pairs a plaintext body that merely contains an angle
+// bracket with a genuine HTML body.
+func bodyRoutingEmail() gsmail.Email {
+	e := basicEmail()
+	e.Body = []byte("Please review <p1> pricing before Friday.")
+	e.HTMLBody = []byte("<p>Please review pricing.</p>")
+	return e
+}
+
+// Body is text/plain and HTMLBody is text/html. Providers used to sniff Body
+// for markup, and the heuristic misread ordinary prose: "<p1>" matched "<p",
+// the message went out as text/html, and the recipient's renderer swallowed
+// the pseudo-tag so the sentence lost a word.
+func testBodyRouting(t *testing.T, h Harness) {
+	got := h.capture(t, bodyRoutingEmail())
+	assertBodyRouting(t, got)
+}
+
+func assertBodyRouting(t *testing.T, got Sent) {
+	t.Helper()
+
+	if got.Text == "" && got.HTML == "" {
+		t.Skip("provider view exposes neither body")
+	}
+	if got.Text != "" && !strings.Contains(got.Text, "<p1>") {
+		t.Errorf("text/plain body = %q, want the Body field verbatim", got.Text)
+	}
+	if got.HTML != "" && !strings.Contains(got.HTML, "<p>Please review") {
+		t.Errorf("text/html body = %q, want the HTMLBody field", got.HTML)
+	}
+	if strings.Contains(got.HTML, "<p1>") {
+		t.Errorf("the plaintext Body was sent as HTML: %q", got.HTML)
+	}
 }
 
 // customHeaderEmail carries the headers a bulk sender cannot do without.

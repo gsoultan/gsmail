@@ -228,14 +228,6 @@ func BenchmarkIsHTML(b *testing.B) {
 	}
 }
 
-func BenchmarkHasHeader(b *testing.B) {
-	body := []byte("MIME-Version: 1.0\r\nContent-Type: text/html\r\n\r\n<html>Body</html>")
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		gsmail.HasHeader(body, "Content-Type")
-	}
-}
-
 func BenchmarkParseRawEmail(b *testing.B) {
 	raw := []byte("From: sender@example.com\r\nTo: receiver1@example.com, receiver2@example.com\r\nSubject: Test Subject\r\n\r\nHello World!")
 	b.ResetTimer()

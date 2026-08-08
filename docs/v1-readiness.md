@@ -1,7 +1,16 @@
 # v1 readiness
 
 A `v1` tag is a promise: the exported API will not break until `v2`. This is an
-audit of what would be frozen today, and what should change first.
+audit of what would be frozen, and what should change first.
+
+> **Status: the changes below have been made.** Everything under "Decided:
+> remove before v1" and "Decided: fix before freezing" is done, with one
+> correction noted inline: `DrainAndClose` stays exported. The audit called for
+> removing it, and that was wrong — every sub-package provider uses it, and an
+> out-of-tree provider needs it alongside `NewHTTPError` to drain a response
+> body on the success path. The two belong together.
+>
+> The root package went from 204 exported symbols to 180.
 
 Current surface, as of v0.5.0:
 
@@ -44,11 +53,12 @@ by exactly one caller inside this module:
 | --- | --- | --- |
 | `BuildMessage(*[]byte, Email) error` | the `*[]byte` parameter exists only to hand a caller a pooled buffer — an implementation shape, not an API | `RenderMessage` or `WithMessage` |
 | `HasHeader([]byte, string) bool` | a byte-scanning helper over a message this package just built | none needed |
-| `DrainAndClose(io.ReadCloser)` | HTTP connection-reuse plumbing | keep unexported |
-| `ParseRetryAfter(string) time.Duration` | HTTP header parsing | keep unexported |
+| `ParseRetryAfter(string) time.Duration` | applied by `NewHTTPError`; providers never call it | unexported |
 
-`NewHTTPError` **stays exported**: an out-of-tree provider needs it to
-participate in the retry contract, and `providertest` asserts that it does.
+`NewHTTPError` and `DrainAndClose` **stay exported**: an out-of-tree provider
+needs both to participate in the retry contract — one to classify the failure,
+the other to drain the body so the connection can be reused. `providertest`
+asserts the first.
 
 ---
 
@@ -79,14 +89,16 @@ HTML in `Body`. Since v0.5.0 `SetBody` routes HTML to `HTMLBody`, so `Body`
 holds plaintext unless a caller assigns HTML to it by hand — at which point
 sniffing is guessing at a mistake.
 
-**Recommendation:** at v1, providers stop sniffing. `Body` is `text/plain`,
-`HTMLBody` is `text/html`, as the field names already say. `SetTextBody` and
-`SetHTMLBody` are the explicit setters; `SetBody` keeps sniffing, because
-sniffing the *template* is a convenience the caller opted into, not a guess
-about a field.
+**Done.** Providers no longer sniff. `Body` is `text/plain`, `HTMLBody` is
+`text/html`, as the field names already said. `SetTextBody` and `SetHTMLBody`
+are the explicit setters; `SetBody` still sniffs, because sniffing the
+*template* is a convenience the caller opted into, not a guess about a field.
 
-This is a breaking behaviour change for anyone assigning HTML to `Body`
-directly, which is why it belongs at v1 rather than in a v0 minor.
+`providertest` now has a `RoutesBodiesByField` case, so no provider can
+reintroduce it: it sends a plaintext body containing `<p1>` and asserts it does
+not arrive as HTML.
+
+This breaks anyone assigning HTML to `Body` directly. Move it to `HTMLBody`.
 
 > A related bug was fixed in this branch: `IsHTML` matched bare prefixes, so
 > `"Please review <p1> pricing"` was classified as HTML and went out as
@@ -101,10 +113,11 @@ provider `APIKey` fields are exported and read on every send. Mutating a
 sender while it is sending is a data race. That is conventional Go — configure
 before use — but at v1 it becomes a permanent hazard with no path to a fix.
 
-**Recommendation:** document the constraint explicitly on each provider type
-("not safe to modify after the first Send"), and treat functional options as
-the v2 conversation rather than the v1 one. Unexporting the fields now would
-break every existing caller for a hazard nobody has hit.
+**Done for the documentation half.** Every provider type now states that its
+fields are read on each operation and must be configured before first use,
+with `SetRetryConfig` called out as the exception. Functional options remain a
+v2 conversation: unexporting the fields would break every existing caller for
+a hazard nobody has hit.
 
 `BaseProvider.RetryConfig` was the one case where the hazard was real — its own
 documentation invited concurrent mutation — and it was unexported in v0.5.0.
