@@ -153,7 +153,7 @@ func (s *Sender) MustCount(t TB, n int) {
 // To returns every message addressed to the given recipient, in To, Cc or Bcc.
 // The comparison ignores case and display names.
 func (s *Sender) To(address string) []gsmail.Email {
-	want := normalizeAddress(address)
+	want := gsmail.NormalizeAddress(address)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -243,21 +243,9 @@ func (s *Sender) summary() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// normalizeAddress reduces an address to the bare lowercased addr-spec, so
-// "Alice <Alice@Example.COM>" matches "alice@example.com". Assertions that
-// only match the exact spelling the code under test happened to use are worse
-// than no assertion.
-func normalizeAddress(address string) string {
-	s := strings.TrimSpace(address)
-	if a, err := gsmail.ParseEmailAddress(s); err == nil && a != nil {
-		s = a.Address
-	}
-	return strings.ToLower(strings.TrimSpace(s))
-}
-
 func containsAddress(list []string, want string) bool {
 	for _, a := range list {
-		if normalizeAddress(a) == want {
+		if gsmail.NormalizeAddress(a) == want {
 			return true
 		}
 	}
