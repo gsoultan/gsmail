@@ -44,7 +44,10 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
   found within seconds of the first target existing.
 
   Crashing inputs are committed under `testdata/fuzz/`, so each becomes a
-  permanent regression case.
+  permanent regression case. `go test ./...` replays every seed and every
+  committed crasher, so regression protection costs nothing on each push;
+  discovery — which wants minutes per target — runs nightly in its own
+  workflow rather than blocking a pull request.
 
 ## [v0.8.0]
 
