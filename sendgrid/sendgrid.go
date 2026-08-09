@@ -73,6 +73,9 @@ type attachment struct {
 // A 4xx other than 408 or 429 is reported as a permanent gsmail.HTTPError and
 // is not retried; a 429 honours the server's Retry-After header.
 func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
+	if err := gsmail.RejectEnvelope("sendgrid", email); err != nil {
+		return err
+	}
 	reqBody, err := p.buildRequest(email)
 	if err != nil {
 		return err

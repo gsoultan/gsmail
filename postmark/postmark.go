@@ -73,6 +73,9 @@ type attachment struct {
 // is not retried; a 429 honours the server's Retry-After header. The error
 // carries Postmark's response body, which names the specific ErrorCode.
 func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
+	if err := gsmail.RejectEnvelope("postmark", email); err != nil {
+		return err
+	}
 	reqBody := postmarkRequest{
 		From:          gsmail.FormatAddress(email.From),
 		To:            gsmail.FormatAddresses(email.To),

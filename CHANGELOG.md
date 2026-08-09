@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the module is at `v0`, breaking changes ship in minor releases. Read the
 **Breaking** section before upgrading.
 
+## [v0.8.2]
+
+Tests and documentation. No production code changed.
+
+### Fixed
+
+- **The DKIM signature was never actually verified.** The test called
+  `dkim.Verify`, swallowed the error into an empty block, discarded the result
+  and left its one real assertion commented out — so it asserted only that the
+  string `DKIM-Signature:` appeared. A structurally plausible but
+  cryptographically wrong signature would have passed.
+
+  That matters more than an unsigned message would: receivers treat a failed
+  signature as a stronger negative than no signature, and the failure is
+  silent. `dkim.VerifyOptions` exposes a `LookupTXT` hook, so the whole thing
+  verifies offline against a published key — there was never a reason not to.
+
+  Twelve tests now run a real verifier over signed output, covering both
+  canonicalisations, multipart messages, Unicode bodies and header coverage,
+  with negative controls proving that tampering is detected and a wrong key is
+  rejected. **The signing was correct**; it is now proven rather than assumed.
+
+- **The README documented removed APIs.** `ValidateEmailExistence` and the
+  `gsmail.MSO*` aliases went in v0.8.0, so anyone copying from the README got
+  code that did not compile. All 41 exported symbols the README references now
+  resolve, and the benchmark table no longer quotes an unexported function.
+
+### Added
+
+- `SECURITY.md`, stating how to report a vulnerability privately and — more
+  usefully — what the library does and does not defend against, so a report
+  can be judged against a stated boundary.
+- `.github/dependabot.yml`. Ten CVEs were found by hand in one review;
+  govulncheck catches the reachable ones per push, but nothing was keeping
+  dependencies current between reviews.
+
 ## [v0.8.1]
 
 A patch release: two parser fixes, fuzzing, and the documentation that should

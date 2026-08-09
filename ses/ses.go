@@ -107,6 +107,9 @@ func (p *Sender) Ping(ctx context.Context) error {
 // rendered locally and sent as a raw MIME message instead, so no part of the
 // Email is silently dropped.
 func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
+	if err := gsmail.RejectEnvelope("ses", email); err != nil {
+		return err
+	}
 	needsRaw := len(email.Attachments) > 0 ||
 		(len(email.Body) > 0 && len(email.HTMLBody) > 0) ||
 		len(email.Headers) > 0 ||

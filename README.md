@@ -18,7 +18,7 @@
 - **Dynamic Templates**: Built-in support for `text/template` and `html/template` with custom template functions.
 - **Flexible Template Loading**: Load templates from strings, HTTP URLs, or AWS S3 compatible storage.
 - **Automatic Content Type Detection**: Automatically detects if an email is HTML or Plaintext based on the content.
-- **Email Validation**: Includes high-performance `IsValidEmail` (regex), `IsDisposableEmail`, and `ValidateEmailExistence` (MX/SMTP check + disposable/temporary email rejection) utilities.
+- **Email Validation**: `IsValidEmail` (regex), `IsDisposableEmail`, and a configurable `Validator` for MX and mailbox checks.
 - **Attachments Support**: Send and receive multiple attachments with automatic MIME encoding/decoding.
 - **Outlook Compatibility**: Convert HTML templates to be compatible with Microsoft Outlook with a single flag.
 - **Zero-Allocation Focus**: Optimized hot paths and `sync.Pool` utilization to minimize heap allocations and pressure on the GC.
@@ -284,13 +284,16 @@ isValid := gsmail.IsValidEmail("test@example.com")
 // Check if email is from a disposable/temporary provider
 isDisposable := gsmail.IsDisposableEmail("test@temp-mail.com")
 
-// Existence check (MX lookup + SMTP handshake)
-err := gsmail.ValidateEmailExistence(context.Background(), "test@example.com")
-if err != nil {
-    fmt.Printf("Email does not exist: %v\n", err)
-}
+// Offline checks only: syntax plus the disposable-domain list.
+err := gsmail.ValidateEmailSyntax("test@example.com")
 
-// Or use the Validate method on a Sender or Receiver
+// Network checks are opt-in, and CheckMailbox needs care: outbound port 25 is
+// blocked by most cloud providers, many operators treat probing as abuse, and
+// a catch-all domain accepts every recipient so a "valid" result means nothing.
+v := gsmail.Validator{CheckMX: true}
+err = v.Validate(context.Background(), "test@example.com")
+
+// Sender and Receiver also expose Validate, which is the offline check.
 err = sender.Validate(context.Background(), "test@example.com")
 ```
 
@@ -361,25 +364,27 @@ Contextual auto-escaping never inspects it, so escaping has to happen here.
 
 `gsmail` also automatically injects UTF-8 charset, `lang` attribute, Dark Mode support markers, and CSS when Outlook compatibility is enabled.
 
-**Outlook best practices:** Use `MSOSafeFontStack()` or `MSOFontStack()` for fonts; wrap emoji in `MSOEmoji("⏰")` or `<span style="font-family:'Segoe UI Emoji','Segoe UI Symbol',Arial,sans-serif">⏰</span>` so Outlook 2016 renders them; avoid `em`/`rem` in MSO-critical styles (use `px`); use tables for layout; declare `charset="UTF-8"` (injected automatically); add `MSOPreheader` at the top of the body for inbox preview. `ToOutlookHTML` automatically replaces empty `<td>` cells with `&nbsp;` to prevent Outlook from collapsing them.
+**Outlook best practices:** Use `MSOSafeFontStack()` or `MSOFontStack()` for fonts; wrap emoji in `MSOEmoji("⏰")` or `<span style="font-family:'Segoe UI Emoji','Segoe UI Symbol',Arial,sans-serif">⏰</span>` so Outlook 2016 renders them; avoid `em`/`rem` in MSO-critical styles (use `px`); use tables for layout; declare `charset="UTF-8"` (injected automatically); add `MSOPreheader` at the top of the body for inbox preview. `outlook.ToOutlookHTML` automatically replaces empty `<td>` cells with `&nbsp;` to prevent Outlook from collapsing them.
 
 ```go
-// Or use MSOEmailLayout to build preheader + header + body + footer in one call
-body := gsmail.MSOEmailLayout(600, "Preview text", "<h1>Logo</h1>", "<p>Main content</p>", "<small>Footer</small>")
+import "github.com/gsoultan/gsmail/outlook"
+
+// MSOEmailLayout builds preheader + header + body + footer in one call.
+body := outlook.MSOEmailLayout(600, "Preview text", "<h1>Logo</h1>", "<p>Main content</p>", "<small>Footer</small>")
 email.SetOutlookBody("<html><body>"+body+"</body></html>", nil)
 
-data := map[string]interface{}{
-    "Preheader": gsmail.MSOPreheader("View in browser if formatting is broken"),
-    "Content":   gsmail.WrapInGhostTable("<div>My Content</div>", "600", "center"),
-    "Button":  gsmail.MSOButton(gsmail.ButtonConfig{
-        Text: "Click Here",
-        Link: "https://example.com",
+data := map[string]any{
+    "Preheader": outlook.MSOPreheader("View in browser if formatting is broken"),
+    "Content":   outlook.WrapInGhostTable("<div>My Content</div>", "600", "center"),
+    "Button": outlook.MSOButton(outlook.ButtonConfig{
+        Text:    "Click Here",
+        Link:    "https://example.com",
         BgColor: "#007bff",
     }),
-    "Image": gsmail.MSOImage("logo.png", "Logo", 200, 50, ""),
-    "Background": gsmail.MSOBackground("bg.png", "#f8f9fa", 600, 400, "<h1>Centered Text</h1>"),
-    "Columns": gsmail.MSOColumns([]int{300, 300}, "Left Content", "Right Content"),
-    "List": gsmail.MSOBulletList([]string{"Feature A", "Feature B"}, "✔", "color:green;"),
+    "Image":      outlook.MSOImage("logo.png", "Logo", 200, 50, ""),
+    "Background": outlook.MSOBackground("bg.png", "#f8f9fa", 600, 400, "<h1>Centered Text</h1>"),
+    "Columns":    outlook.MSOColumns([]int{300, 300}, "Left Content", "Right Content"),
+    "List":       outlook.MSOBulletList([]string{"Feature A", "Feature B"}, "✔", "color:green;"),
 }
 ```
 
@@ -654,11 +659,15 @@ See `sendgrid/conformance_test.go` for a worked example.
 `gsmail` is optimized for high performance and low memory allocations. Below are the benchmark results for core utilities:
 
 ```text
-BenchmarkIsHTML-12                      160427133                7.527 ns/op          0 B/op           0 allocs/op
-BenchmarkHasHeader-12                   35312084                36.48 ns/op           0 B/op           0 allocs/op
-BenchmarkParseRawEmail-12                 344103              4371 ns/op           5400 B/op          15 allocs/op
-BenchmarkParseRawEmailMultipart-12         60823             20156 ns/op          21045 B/op          75 allocs/op
+BenchmarkWithMessage_NoCustomHeaders-15     65556      9145 ns/op     2009 B/op    44 allocs/op
+BenchmarkWithMessage_HeaderScaling/headers=64-15
+                                            23829     15237 ns/op     5003 B/op   126 allocs/op
+BenchmarkGetRetryConfig-15             1000000000     0.34 ns/op         0 B/op     0 allocs/op
+BenchmarkParseRawEmail-12                  344103      4371 ns/op     5400 B/op    15 allocs/op
 ```
+
+Run them yourself with `go test -bench . -benchmem`; the figures above are from
+one machine and are only useful as a shape.
 
 *Tested on: AMD Ryzen 5 5500U, Go 1.25+*
 

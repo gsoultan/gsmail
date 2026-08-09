@@ -1,0 +1,31 @@
+# Five dependency CVEs and five standard-library ones were found by hand in a
+# single review. govulncheck in CI catches the reachable ones on each push,
+# which is the important half, but nothing was keeping dependencies current
+# between reviews.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # AWS ships many modules in lockstep; one PR per week beats a dozen.
+      aws-sdk:
+        patterns:
+          - "github.com/aws/*"
+      opentelemetry:
+        patterns:
+          - "go.opentelemetry.io/*"
+      golang-x:
+        patterns:
+          - "golang.org/x/*"
+    commit-message:
+      prefix: "build"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"

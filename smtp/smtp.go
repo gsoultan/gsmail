@@ -102,11 +102,22 @@ func (p *Sender) tlsConfig(serverName string) *tls.Config {
 func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
 	addr := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
 
-	// Collect all recipients.
-	recipients := make([]string, 0, len(email.To)+len(email.Cc)+len(email.Bcc))
-	recipients = append(recipients, email.To...)
-	recipients = append(recipients, email.Cc...)
-	recipients = append(recipients, email.Bcc...)
+	// Collect the envelope recipients — the addresses given in RCPT TO, which
+	// are not necessarily the addresses the message says it is addressed to.
+	//
+	// An explicit Envelope replaces the derived list rather than adding to it,
+	// so a caller rendering one copy per recipient can still show the whole Cc
+	// list in the headers without delivering a copy to every Cc address for
+	// every recipient. See gsmail.Email.Envelope.
+	var recipients []string
+	if len(email.Envelope) > 0 {
+		recipients = append(recipients, email.Envelope...)
+	} else {
+		recipients = make([]string, 0, len(email.To)+len(email.Cc)+len(email.Bcc))
+		recipients = append(recipients, email.To...)
+		recipients = append(recipients, email.Cc...)
+		recipients = append(recipients, email.Bcc...)
+	}
 	if len(recipients) == 0 {
 		return gsmail.NonRetryable(fmt.Errorf("smtp: message has no recipients"))
 	}

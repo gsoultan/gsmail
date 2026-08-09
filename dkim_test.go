@@ -7,8 +7,6 @@ import (
 	"encoding/pem"
 	"strings"
 	"testing"
-
-	"github.com/emersion/go-msgauth/dkim"
 )
 
 func TestSignDKIM(t *testing.T) {
@@ -45,22 +43,10 @@ func TestSignDKIM(t *testing.T) {
 		t.Errorf("Signed message does not contain DKIM-Signature header")
 	}
 
-	// 6. Verify the signature using the library itself
-	verifications, err := dkim.Verify(strings.NewReader(string(signed)))
-	if err != nil {
-		// Verification might fail because we don't have real DNS
-		// But it should at least parse the signature.
-		// Actually dkim.Verify attempts to fetch the public key from DNS.
-		// So it will likely fail unless we mock the resolver.
-	}
-
-	_ = verifications
-
-	// Let's at least check it doesn't return a fatal error before verification attempts
-	if err != nil && !strings.Contains(err.Error(), "no such host") && !strings.Contains(err.Error(), "lookup") {
-		// Ignore DNS errors
-		// t.Errorf("Verify failed with non-DNS error: %v", err)
-	}
+	// Cryptographic verification lives in dkim_verify_test.go, which publishes
+	// the public key through a stubbed resolver and runs a real verifier over
+	// the result. Checking for the header alone, as this test used to, would
+	// pass for a signature that no receiver would accept.
 }
 
 func TestParsePrivateKey(t *testing.T) {

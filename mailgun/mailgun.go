@@ -40,6 +40,9 @@ func NewSender(domain, apiKey string) *Sender {
 // A 4xx other than 408 or 429 is reported as a permanent gsmail.HTTPError and
 // is not retried; a 429 honours the server's Retry-After header.
 func (p *Sender) Send(ctx context.Context, email gsmail.Email) error {
+	if err := gsmail.RejectEnvelope("mailgun", email); err != nil {
+		return err
+	}
 	// Build the multipart payload once. It is identical on every attempt, and
 	// re-encoding attachments per retry is pure waste.
 	body, contentType, err := buildForm(email)
