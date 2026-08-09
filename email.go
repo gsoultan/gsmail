@@ -47,6 +47,35 @@ type Email struct {
 	// itself (From, To, Cc, Bcc, Reply-To, Subject, MIME-Version, Content-Type,
 	// Content-Transfer-Encoding) are ignored.
 	Headers map[string]string
+	// Envelope overrides who the message is delivered to, without changing who
+	// it appears to be addressed to.
+	//
+	// By default the SMTP recipient list is To + Cc + Bcc, which conflates two
+	// separate things: the envelope of RFC 5321, meaning the addresses given in
+	// RCPT TO, and the header fields of RFC 5322, meaning what the reader sees.
+	// Collapsing them is right for an ordinary send and wrong whenever a
+	// message is rendered per recipient — a personalised copy, an open-tracking
+	// pixel, a signed unsubscribe link — because a visible Cc list would then
+	// deliver another copy to every Cc address for every recipient.
+	//
+	// When Envelope is non-empty it replaces the derived list entirely, so To,
+	// Cc and Bcc affect only the headers. Sending one copy per recipient while
+	// still showing the full Cc list therefore becomes:
+	//
+	//	for _, rcpt := range everyone {
+	//		e := base                     // To and Cc describe the whole audience
+	//		e.Envelope = []string{rcpt}   // this copy goes to one address
+	//		e.Bcc = nil                   // never disclose the blind list
+	//		send(e)
+	//	}
+	//
+	// A Bcc address must appear in Envelope to receive anything, and must stay
+	// out of Bcc: BuildMessage writes no Bcc header, but a provider API may.
+	//
+	// Only the SMTP sender honours this. Providers that hand a recipient list to
+	// a vendor API cannot separate the two, and reject a message that sets it
+	// rather than silently delivering to everyone named in the headers.
+	Envelope []string
 	// HTMLFuncs holds custom functions for HTML templates used with this email.
 	HTMLFuncs htmltemplate.FuncMap
 	// TextFuncs holds custom functions for text templates used with this email.
