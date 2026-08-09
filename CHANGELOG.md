@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the module is at `v0`, breaking changes ship in minor releases. Read the
 **Breaking** section before upgrading.
 
+## [v0.8.4]
+
+### Fixed
+
+- **The IMAP shutdown test raced the timeout it was measuring.** It gave
+  shutdown ten seconds; `idleShutdownTimeout` is also ten seconds, so whenever
+  `endIdle` had to wait out its full budget — the case the test exists to
+  cover — the shutdown finished at the moment the test gave up. A slow but
+  correct shutdown was indistinguishable from a hung one. The budget is now
+  derived from the same constant so the two cannot drift apart.
+
+  Dependabot surfaced this on its first day, failing a `go-pop3` bump on a test
+  in the `imap` package. The bump was innocent: the `go.sum` diff touched only
+  `go-pop3`, so it could not reach `go-imap`. The runner was simply slow enough
+  to expose a flake that was already there.
+
+- `attribute.Value.Emit` is deprecated in newer OpenTelemetry releases;
+  replaced with `AsInterface`, which exists either side of the bump.
+
+### Changed
+
+- Dependency updates: the AWS SDK (`aws-sdk-go-v2` 1.41.5 → 1.43.4, `s3`
+  1.97.3 → 1.106.5, `sesv2` 1.59.0 → 1.66.4 and related), OpenTelemetry,
+  `go-pop3` 1.0.0 → 1.0.2, and the GitHub Actions used by CI.
+
 ## [v0.8.3]
 
 Tests and documentation. No production code changed.
