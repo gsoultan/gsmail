@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the module is at `v0`, breaking changes ship in minor releases. Read the
 **Breaking** section before upgrading.
 
-## [v0.8.2]
+## [v0.8.3]
 
 Tests and documentation. No production code changed.
 
@@ -43,6 +43,36 @@ Tests and documentation. No production code changed.
 - `.github/dependabot.yml`. Ten CVEs were found by hand in one review;
   govulncheck catches the reachable ones per push, but nothing was keeping
   dependencies current between reviews.
+
+## [v0.8.2]
+
+### Added
+
+- **`Email.Envelope`**, separating who a message is *delivered* to from who it
+  appears to be addressed to.
+
+  The recipient list was always derived as To + Cc + Bcc, which conflates the
+  RFC 5321 envelope — the addresses in `RCPT TO` — with the RFC 5322 header
+  fields the reader sees. That is right for an ordinary send and wrong whenever
+  a message is rendered per recipient: with a visible Cc list, every Cc address
+  would receive another copy for every recipient.
+
+  When `Envelope` is set it replaces the derived list entirely, so To, Cc and
+  Bcc affect only the headers:
+
+      for _, rcpt := range everyone {
+          e := base                     // To and Cc describe the whole audience
+          e.Envelope = []string{rcpt}   // this copy goes to one address
+          e.Bcc = nil                   // never disclose the blind list
+          send(e)
+      }
+
+- **`ErrEnvelopeUnsupported` and `RejectEnvelope`.** Only the SMTP sender can
+  honour an explicit envelope; a provider that hands a recipient list to a
+  vendor API cannot separate the two. Those providers reject such a message
+  rather than delivering it, because silently falling back to To + Cc would
+  send every named recipient one copy *per* recipient — precisely the outcome
+  the feature exists to avoid.
 
 ## [v0.8.1]
 
