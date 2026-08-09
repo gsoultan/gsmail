@@ -8,7 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the module is at `v0`, breaking changes ship in minor releases. Read the
 **Breaking** section before upgrading.
 
-## [Unreleased]
+## [v0.8.2]
+
+Tests and documentation. No production code changed.
 
 ### Fixed
 
