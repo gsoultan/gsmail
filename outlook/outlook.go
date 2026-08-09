@@ -105,6 +105,7 @@ var (
 
 	outlookNamespaces = []byte(` xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns:m="http://schemas.microsoft.com/office/2004/12/omml"`)
 	outlookHeadTags   = []byte(`
+    <!--gsmail:outlook-->
     <meta charset="UTF-8">
     <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
     <!--[if gte mso 9]>
@@ -197,8 +198,62 @@ func IsOutlookCompatible(html []byte) bool {
 
 // ToOutlookHTML converts an HTML email template to be compatible with Microsoft Outlook.
 // It injects necessary namespaces, meta tags, and MSO-specific styles.
+// vmlNamespaces are the declarations Word's rendering engine needs, listed
+// individually so a document that already declares some keeps only what it is
+// missing.
+var vmlNamespaces = [...]struct {
+	prefix []byte
+	decl   []byte
+}{
+	{[]byte("xmlns:v="), []byte(` xmlns:v="urn:schemas-microsoft-com:vml"`)},
+	{[]byte("xmlns:o="), []byte(` xmlns:o="urn:schemas-microsoft-com:office:office"`)},
+	{[]byte("xmlns:w="), []byte(` xmlns:w="urn:schemas-microsoft-com:office:word"`)},
+	{[]byte("xmlns:m="), []byte(` xmlns:m="http://schemas.microsoft.com/office/2004/12/omml"`)},
+}
+
+// appendMissingNamespaces adds only the namespace declarations the open tag does
+// not already carry.
+//
+// The whole block used to be appended unconditionally, so a document that
+// already declared xmlns:v and xmlns:o — which any generator emitting VML has to
+// — came out with each of them twice on the same element. Duplicate attributes
+// are invalid; parsers keep the first and discard the rest, so nothing visibly
+// broke, but the output failed validation and grew on every pass. The lang guard
+// immediately below already worked this way, which is what made the omission an
+// oversight rather than a decision.
+func appendMissingNamespaces(bufPtr *[]byte, openTag []byte) {
+	for _, ns := range vmlNamespaces {
+		if !bytes.Contains(openTag, ns.prefix) {
+			*bufPtr = append(*bufPtr, ns.decl...)
+		}
+	}
+}
+
+// outlookSentinel marks a document that has already been converted. It is a
+// comment, so every client ignores it, and it is emitted on both the fragment
+// and the full-document path.
+var outlookSentinel = []byte("<!--gsmail:outlook-->")
+
+// AlreadyConverted reports whether ToOutlookHTML has already been applied.
+//
+// Useful to a caller that hardens at more than one point in a pipeline and
+// wants to know rather than guess.
+func AlreadyConverted(html []byte) bool {
+	return bytes.Contains(html, outlookSentinel)
+}
+
 func ToOutlookHTML(html []byte) []byte {
 	if len(html) == 0 {
+		return html
+	}
+
+	// Converting twice used to append every injection again: the head tags, the
+	// mso block, the container table and the body holder all doubled, and a
+	// third pass tripled them. Nothing rendered wrongly, so a pipeline that
+	// hardened on save and again on send simply shipped a document several
+	// times larger than it needed to be — which matters when Gmail clips a
+	// message at 102KB and drops everything after the cut.
+	if AlreadyConverted(html) {
 		return html
 	}
 
@@ -224,7 +279,7 @@ func ToOutlookHTML(html []byte) []byte {
 			if htmlEnd != -1 {
 				htmlEnd += htmlIdx
 				*bufPtr = append(*bufPtr, html[curr:htmlEnd]...)
-				*bufPtr = append(*bufPtr, outlookNamespaces...)
+				appendMissingNamespaces(bufPtr, html[curr:htmlEnd+1])
 				if !bytes.Contains(html[curr:htmlEnd+1], []byte("lang=")) {
 					*bufPtr = append(*bufPtr, []byte(` lang="en"`)...)
 				}
