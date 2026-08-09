@@ -241,8 +241,11 @@ func TestIdleShutsDownCleanlyOnCancel(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 		cancel()
 
-		// Both channels must close, and promptly.
-		deadline := time.After(10 * time.Second)
+		// Comfortably longer than idleShutdownTimeout. Giving the test the
+		// same budget as the implementation's own worst case makes a
+		// slow-but-correct shutdown indistinguishable from a hung one, which
+		// is a coin flip on a loaded runner rather than a test.
+		deadline := time.After(4 * idleShutdownTimeout)
 		for emails != nil || errs != nil {
 			select {
 			case _, ok := <-emails:
@@ -254,7 +257,7 @@ func TestIdleShutsDownCleanlyOnCancel(t *testing.T) {
 					errs = nil
 				}
 			case <-deadline:
-				t.Fatalf("Idle did not shut down within 10s (iteration %d)", i)
+				t.Fatalf("Idle did not shut down within %s (iteration %d)", 4*idleShutdownTimeout, i)
 			}
 		}
 	}

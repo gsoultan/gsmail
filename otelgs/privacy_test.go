@@ -3,6 +3,7 @@ package otelgs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -38,7 +39,9 @@ func personalEmail() gsmail.Email {
 func attrsOf(span sdktrace.ReadOnlySpan) map[string]string {
 	out := map[string]string{}
 	for _, kv := range span.Attributes() {
-		out[string(kv.Key)] = kv.Value.Emit()
+		// AsInterface avoids Value.Emit, deprecated in newer OpenTelemetry
+		// releases, and exists in both, so this compiles either side of a bump.
+		out[string(kv.Key)] = fmt.Sprint(kv.Value.AsInterface())
 	}
 	return out
 }
