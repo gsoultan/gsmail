@@ -158,9 +158,29 @@ Changing `Decode`'s signature is not. Before v1, settle:
 - `Decode func(*testing.T, *http.Request, []byte) Sent` ties the harness to
   `net/http`. That is correct for the four HTTP providers and irrelevant to
   SMTP, which is why `SMTPHarness` is separate. Keep them separate.
-- `Sent` uses zero values to mean "this transport does not express that", and
+- ~~`Sent` uses zero values to mean "this transport does not express that", and
   the suite skips the corresponding check. This is implicit; consider an
-  explicit `Unsupported []string` before freezing.
+  explicit `Unsupported []string` before freezing.~~
+
+  **Done.** `Harness.Unsupported []string` names the fields a provider's API
+  cannot carry, using exported `Field*` constants. An empty field that is not
+  declared is now a failure, so "this API has no Bcc" and "the Bcc was
+  dropped" stop looking identical to the suite.
+
+  It went on `Harness` rather than `Sent`, against the suggestion above,
+  because it describes the transport rather than one request. SES decides its
+  content shape per message and its `Decode` has two return paths; on `Sent`
+  the list would have to be repeated on both, and the branch that forgot it
+  would read as a provider dropping fields — reintroducing the ambiguity in a
+  new place.
+
+  An unrecognised name is rejected rather than ignored. A silently-unmatched
+  string disables nothing and skips nothing while looking deliberate, which is
+  the same failure as the zero value wearing a better disguise.
+
+  All five in-tree providers pass with no declarations and zero skipped
+  subtests, so nothing was relying on the implicit behaviour — the checks were
+  live, they just could not have told anyone if they had not been.
 
 ### Everything else
 
