@@ -63,7 +63,8 @@ func TestDKIMPublicKeyRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotDER, err := x509.ParsePKIXPublicKey(mustDecodeBase64(t, dkimPublishedKey(record)))
+	published, _ := dkimPublishedKey(record)
+	gotDER, err := x509.ParsePKIXPublicKey(mustDecodeBase64(t, published))
 	if err != nil {
 		t.Fatalf("published key does not parse: %v", err)
 	}
@@ -137,7 +138,7 @@ func TestCheckDKIMKeyIgnoresWhitespaceInThePublishedKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := dkimPublishedKey(record)
+	p, _ := dkimPublishedKey(record)
 	split := "v=DKIM1; k=rsa; p=" + p[:60] + " " + p[60:120] + "\t" + p[120:]
 
 	h := HealthChecker{Resolver: txtResolver(map[string][]string{"s1._domainkey.example.com": {split}})}
@@ -145,6 +146,26 @@ func TestCheckDKIMKeyIgnoresWhitespaceInThePublishedKey(t *testing.T) {
 	res := h.CheckDKIMKey(context.Background(), "example.com", "s1", keyPEM)
 	if !res.Valid {
 		t.Fatalf("a key split across strings should still match: %+v", res)
+	}
+}
+
+// A record read back from a zone file or dig output keeps the quotes that
+// delimit each character-string. They are framing, not key material.
+func TestCheckDKIMKeyIgnoresQuotingInThePublishedKey(t *testing.T) {
+	keyPEM, _ := testPrivateKeyPEM(t)
+	record, err := DKIMPublicKeyRecord(keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p, _ := dkimPublishedKey(record)
+	quoted := `v=DKIM1; k=rsa; p="` + p[:60] + `" "` + p[60:] + `"`
+
+	h := HealthChecker{Resolver: txtResolver(map[string][]string{"s1._domainkey.example.com": {quoted}})}
+
+	res := h.CheckDKIMKey(context.Background(), "example.com", "s1", keyPEM)
+	if !res.Valid {
+		t.Fatalf("a quoted key should still match: %+v", res)
 	}
 }
 
@@ -159,6 +180,30 @@ func TestCheckDKIMKeyOnRevokedRecord(t *testing.T) {
 	res := h.CheckDKIMKey(context.Background(), "example.com", "s1", keyPEM)
 	if res.Valid {
 		t.Error("a revoked key must not report valid")
+	}
+	// A revocation is a deliberate act with its own remedy: publish a key
+	// again. Reporting it as an absent tag sends the reader looking for a
+	// malformed record that isn't there.
+	if !strings.Contains(res.Details, "revoked") {
+		t.Errorf("a revocation should be named as one, got %q", res.Details)
+	}
+}
+
+// A record carrying no p= tag at all is malformed, which is a different fault
+// from a revocation and has a different fix.
+func TestCheckDKIMKeyDistinguishesAMissingTagFromARevocation(t *testing.T) {
+	keyPEM, _ := testPrivateKeyPEM(t)
+
+	h := HealthChecker{Resolver: txtResolver(map[string][]string{
+		"s1._domainkey.example.com": {"v=DKIM1; k=rsa"},
+	})}
+
+	res := h.CheckDKIMKey(context.Background(), "example.com", "s1", keyPEM)
+	if res.Valid {
+		t.Error("a record with no key cannot be valid")
+	}
+	if strings.Contains(res.Details, "revoked") {
+		t.Errorf("a missing tag is not a revocation, got %q", res.Details)
 	}
 }
 

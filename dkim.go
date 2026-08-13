@@ -146,15 +146,23 @@ func dkimRecordTags(record string) map[string]string {
 	return tags
 }
 
-// dkimPublishedKey extracts the p= value from a record, with whitespace
-// removed. Published records are frequently split across quoted strings and
-// re-joined with spaces, which is not part of the key.
-func dkimPublishedKey(record string) string {
-	p := dkimRecordTags(record)["p"]
+// dkimPublishedKey extracts the p= value from a record, with whitespace and
+// quoting removed. Published records are frequently split across quoted
+// strings and re-joined with spaces, neither of which is part of the key.
+//
+// The bool reports whether a p= tag was present at all. An absent tag and an
+// empty one are different faults -- a malformed record versus a deliberate
+// revocation -- so callers must be able to tell them apart.
+func dkimPublishedKey(record string) (string, bool) {
+	p, ok := dkimRecordTags(record)["p"]
+	if !ok {
+		return "", false
+	}
 	return strings.Map(func(r rune) rune {
-		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
+		switch r {
+		case ' ', '\t', '\r', '\n', '"':
 			return -1
 		}
 		return r
-	}, p)
+	}, p), true
 }

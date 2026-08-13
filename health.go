@@ -359,11 +359,17 @@ func (h HealthChecker) CheckDKIMKey(ctx context.Context, domain, selector string
 		}
 	}
 
-	got := dkimPublishedKey(res.Record)
+	got, published := dkimPublishedKey(res.Record)
 	switch {
-	case got == "":
+	case !published:
 		res.Valid = false
 		res.Details = "DKIM record has no p= tag, so nothing can verify a signature"
+	case got == "":
+		// An empty p= is how a key is revoked. Saying the tag is missing
+		// sends the reader hunting for a malformed record; the fix here is
+		// to publish a key again.
+		res.Valid = false
+		res.Details = "DKIM public key has been revoked (p= is empty), so no signature can verify"
 	case subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1:
 		res.Valid = true
 		res.Details = "published key matches the signing key"
