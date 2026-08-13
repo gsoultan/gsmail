@@ -10,6 +10,32 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
 
 ## [Unreleased]
 
+## [v0.9.1]
+
+### Fixed
+
+- **`CheckDKIMKey` told an absent `p=` tag apart from an empty one.**
+  `dkimPublishedKey` returned a bare string, so a record carrying no `p=` and a
+  record carrying `p=` with nothing after it arrived at the check as the same
+  empty string. Both reported "DKIM record has no p= tag", which is true of
+  only one of them.
+
+  They are different faults with different fixes. An absent tag is a malformed
+  record. An empty one is a revocation — the documented way to retire a key —
+  and the remedy is to publish a key again, not to go looking for a syntax
+  error in a record that has none.
+
+- **The published key is compared with quoting stripped**, alongside the
+  whitespace already removed. A TXT record longer than 255 bytes is split into
+  several character-strings, and a record read back from a zone file or `dig`
+  output keeps the quotes that delimit them. They frame the value; they are not
+  part of it.
+
+  **This changes a verdict, not just a message.** A selector whose record was
+  read back quoted reported a mismatch and now reports a match. The new answer
+  is the correct one — the key was always the right key — but a dashboard
+  tracking that check will move, and it will move on records nobody edited.
+
 ## [v0.9.0]
 
 ### Breaking
