@@ -12,6 +12,37 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
 
 ### Added
 
+- **`ParseRawEmail` now retains the headers `Email` does not model.** It kept
+  only From, To, Cc, Subject and Reply-To, so an inbound message lost its
+  `Message-ID`, `In-Reply-To`, `References` and every `X-*` field — and
+  anything that needed one had to re-parse the raw bytes this package had just
+  handed over.
+
+- **`Email.Header`**, a case-insensitive lookup. `net/mail` canonicalises
+  `Message-ID` to `Message-Id` and `DKIM-Signature` to `Dkim-Signature`, so
+  indexing `Headers` with the expected spelling silently finds nothing. This
+  reads a parsed message and one you built alike.
+
+- **`Email.MessageIdentity`** returns a stable identifier and the source it
+  came from: `Message-ID`, then mailbox and UID, then a content digest, in
+  decreasing order of how widely each holds. The source is returned rather
+  than folded into the string because the three kinds of value can collide, so
+  a store mixing them should record which was used. Scoping by tenant or
+  account stays with the caller. A `Message-ID` is chosen by the sender, so
+  deduplicating on it is fine and treating two messages as "the same" for
+  anything security-sensitive is not.
+
+- **`Email.MessageID`** returns the value with its angle brackets removed.
+
+### Changed
+
+- **Trace headers are retained but never rendered.** `Received`,
+  `Return-Path`, `DKIM-Signature`, `Authentication-Results` and the ARC set
+  survive a parse so an inbound message can be inspected, and are dropped on
+  render by both `BuildMessage` and `CustomHeaders`: a new message claiming a
+  delivery chain or a signature it did not earn is forging its own provenance.
+  `In-Reply-To` and `References` do survive, since a reply should carry them.
+
 - **`CheckDKIMKey`** verifies that the DKIM record published for a selector
   carries the public half of the key you actually sign with, and
   **`DKIMPublicKeyRecord`** derives the record a private key should publish.
