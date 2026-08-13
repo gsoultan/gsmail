@@ -528,6 +528,8 @@ func ParseRawEmail(raw []byte) (Email, error) {
 		email.To = parseAddressList(to)
 	}
 
+	email.Headers = parsedHeaders(msg.Header)
+
 	if cc := msg.Header.Get("Cc"); cc != "" {
 		email.Cc = parseAddressList(cc)
 	}
@@ -549,6 +551,76 @@ func ParseRawEmail(raw []byte) (Email, error) {
 	}
 
 	return email, err
+}
+
+const (
+	// maxParsedHeaders bounds how many header fields are carried onto an
+	// Email. A legitimate message with a long Received chain rarely exceeds a
+	// few dozen; the cap only stops a hostile one from making the map the
+	// expensive part of holding a message.
+	maxParsedHeaders = 256
+
+	// maxHeaderValueLen bounds a single retained value. A DKIM-Signature or a
+	// long References chain is legitimately a few kilobytes, so this is
+	// generous; anything past it is dropped rather than truncated, because a
+	// truncated References chain is worse than an absent one.
+	maxHeaderValueLen = 16 << 10
+)
+
+// parsedHeaders carries across the header fields that Email does not already
+// model as a typed field.
+//
+// Nothing was retained before, so an inbound message lost its Message-ID,
+// In-Reply-To, References and every X-* field, and anything that needed them
+// had to re-parse the raw bytes it had just handed over.
+//
+// Keys are the canonical form net/mail produces, which is not always the
+// spelling people expect -- "Message-ID" canonicalises to "Message-Id" and
+// "DKIM-Signature" to "Dkim-Signature". Use Email.Header to read one without
+// having to know that.
+func parsedHeaders(h mail.Header) map[string]string {
+	out := make(map[string]string, len(h))
+	for name, values := range h {
+		if len(out) >= maxParsedHeaders {
+			break
+		}
+		if _, modelled := reservedHeaders[strings.ToLower(name)]; modelled {
+			continue
+		}
+		if len(values) == 0 || len(values[0]) > maxHeaderValueLen {
+			continue
+		}
+		// A repeated field keeps its first value: Email.Headers is
+		// single-valued, and the first Received is the most recent hop.
+		if v := sanitizeHeaderValue(values[0]); v != "" {
+			out[name] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// traceHeaders record how a message travelled and are meaningful only on the
+// message that actually travelled.
+//
+// They are retained on parse, so an inbound message can be inspected, but are
+// never written on render: a new message claiming a Received chain, a
+// DKIM-Signature or an Authentication-Results verdict it did not earn is
+// forging its own provenance, and a receiver that believes it has been
+// deceived by this library rather than by the sender.
+var traceHeaders = map[string]struct{}{
+	"received":                   {},
+	"return-path":                {},
+	"dkim-signature":             {},
+	"domainkey-signature":        {},
+	"authentication-results":     {},
+	"arc-seal":                   {},
+	"arc-message-signature":      {},
+	"arc-authentication-results": {},
+	"delivered-to":               {},
+	"x-received":                 {},
 }
 
 // parseAddressList splits an address header into individual addresses.
@@ -944,7 +1016,11 @@ func CustomHeaders(h map[string]string) (map[string]string, error) {
 
 	out := make(map[string]string, len(h))
 	for _, name := range sortedHeaderNames(h) {
-		if _, reserved := reservedHeaders[strings.ToLower(name)]; reserved {
+		lower := strings.ToLower(name)
+		if _, reserved := reservedHeaders[lower]; reserved {
+			continue
+		}
+		if _, trace := traceHeaders[lower]; trace {
 			continue
 		}
 		if !isValidHeaderName(name) {
@@ -1241,6 +1317,9 @@ func buildMessage(bufPtr *[]byte, email Email) error {
 	for _, name := range sortedHeaderNames(email.Headers) {
 		lower := strings.ToLower(name)
 		if _, reserved := reservedHeaders[lower]; reserved {
+			continue
+		}
+		if _, trace := traceHeaders[lower]; trace {
 			continue
 		}
 		if (lower == "date" && wroteDate) || (lower == "message-id" && wroteMessageID) {

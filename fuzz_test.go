@@ -33,6 +33,7 @@ func FuzzParseRawEmail(f *testing.F) {
 	f.Add([]byte(""))
 	f.Add([]byte("\r\n\r\n"))
 	f.Add([]byte("Content-Type: multipart/mixed\r\n\r\nno boundary"))
+	f.Add([]byte("Message-ID: <a@b.test>\r\nIn-Reply-To: <c@d.test>\r\nX-Odd: v\r\n\r\nbody"))
 
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		email, err := ParseRawEmail(raw)
@@ -70,6 +71,10 @@ func FuzzParseRawEmail(f *testing.F) {
 		for i, att := range email.Attachments {
 			fields[fmt.Sprintf("Attachments[%d].Filename", i)] = att.Filename
 			fields[fmt.Sprintf("Attachments[%d].ContentID", i)] = att.ContentID
+		}
+		// Retained headers are attacker-supplied and now reach the caller.
+		for name, value := range email.Headers {
+			fields["Headers["+name+"]"] = value
 		}
 		for name, value := range fields {
 			for _, r := range value {
