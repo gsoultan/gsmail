@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"strings"
 
 	"github.com/emersion/go-msgauth/dkim"
 )
@@ -98,4 +100,61 @@ func parsePrivateKey(key any) (crypto.Signer, error) {
 	}
 
 	return signer, nil
+}
+
+// DKIMPublicKeyRecord returns the value a DKIM TXT record should publish for a
+// private key: "v=DKIM1; k=rsa; p=<base64 DER>".
+//
+// It accepts the same key forms as SignDKIM — a PEM string or []byte, or a
+// crypto.Signer — so the key you sign with is the key you check against.
+func DKIMPublicKeyRecord(privateKey any) (string, error) {
+	p, err := dkimPublicKeyBase64(privateKey)
+	if err != nil {
+		return "", err
+	}
+	return "v=DKIM1; k=rsa; p=" + p, nil
+}
+
+// dkimPublicKeyBase64 derives the base64 DER public half of a private key,
+// which is what a DKIM record carries in its p= tag.
+func dkimPublicKeyBase64(privateKey any) (string, error) {
+	signer, err := parsePrivateKey(privateKey)
+	if err != nil {
+		return "", fmt.Errorf("dkim: parse private key: %w", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(signer.Public())
+	if err != nil {
+		return "", fmt.Errorf("dkim: marshal public key: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(der), nil
+}
+
+// dkimRecordTags parses a DKIM TXT record into its tag/value pairs.
+func dkimRecordTags(record string) map[string]string {
+	tags := make(map[string]string)
+	for _, part := range strings.Split(record, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if k, v, ok := strings.Cut(part, "="); ok {
+			// A base64 p= value may itself contain '=' padding, so only the
+			// first separator delimits the tag.
+			tags[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	return tags
+}
+
+// dkimPublishedKey extracts the p= value from a record, with whitespace
+// removed. Published records are frequently split across quoted strings and
+// re-joined with spaces, which is not part of the key.
+func dkimPublishedKey(record string) string {
+	p := dkimRecordTags(record)["p"]
+	return strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
+			return -1
+		}
+		return r
+	}, p)
 }

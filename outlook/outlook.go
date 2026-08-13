@@ -103,8 +103,7 @@ var (
 	tagBodyLower = []byte("<body")
 	tagBodyUpper = []byte("<BODY")
 
-	outlookNamespaces = []byte(` xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns:m="http://schemas.microsoft.com/office/2004/12/omml"`)
-	outlookHeadTags   = []byte(`
+	outlookHeadTags = []byte(`
     <!--gsmail:outlook-->
     <meta charset="UTF-8">
     <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">

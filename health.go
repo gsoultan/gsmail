@@ -2,6 +2,7 @@ package gsmail
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net"
@@ -46,6 +47,11 @@ func CheckDomainHealth(ctx context.Context, domain string, selectors []string) (
 	return HealthChecker{}.CheckDomainHealth(ctx, domain, selectors)
 }
 
+// CheckMX retrieves the MX records for a domain.
+func CheckMX(ctx context.Context, domain string) HealthResult {
+	return HealthChecker{}.CheckMX(ctx, domain)
+}
+
 // CheckSPF retrieves and validates the SPF record for a domain.
 func CheckSPF(ctx context.Context, domain string) HealthResult {
 	return HealthChecker{}.CheckSPF(ctx, domain)
@@ -85,21 +91,7 @@ func (h HealthChecker) CheckDomainHealth(ctx context.Context, domain string, sel
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		mxs, err := h.resolver().LookupMX(ctx, domain)
-		res := HealthResult{}
-		if err != nil {
-			res.Error = err.Error()
-		} else if len(mxs) > 0 {
-			res.Found = true
-			res.Valid = true
-			var mxList []string
-			for _, mx := range mxs {
-				mxList = append(mxList, fmt.Sprintf("%s (%d)", mx.Host, mx.Pref))
-			}
-			res.Record = strings.Join(mxList, ", ")
-		} else {
-			res.Details = "No MX records found"
-		}
+		res := h.CheckMX(ctx, domain)
 		select {
 		case resChan <- result{typ: "mx", res: res}:
 		case <-ctx.Done():
@@ -167,6 +159,36 @@ func (h HealthChecker) CheckDomainHealth(ctx context.Context, domain string, sel
 				health.DKIM[r.selector] = r.res
 			}
 		}
+	}
+}
+
+// CheckMX retrieves the MX records for a domain.
+//
+// A domain that does not exist reports Found false rather than an error, which
+// is what CheckSPF and CheckDMARC already did. The MX check used to treat it
+// as an error, so the same missing domain produced a "not found" verdict from
+// two checks and a failure from the third -- which reads as an outage rather
+// than as an unconfigured domain.
+func (h HealthChecker) CheckMX(ctx context.Context, domain string) HealthResult {
+	mxs, err := h.resolver().LookupMX(ctx, domain)
+	if err != nil {
+		if isNotFound(err) {
+			return HealthResult{Found: false, Details: "No MX records found"}
+		}
+		return HealthResult{Error: err.Error()}
+	}
+	if len(mxs) == 0 {
+		return HealthResult{Found: false, Details: "No MX records found"}
+	}
+
+	hosts := make([]string, 0, len(mxs))
+	for _, mx := range mxs {
+		hosts = append(hosts, fmt.Sprintf("%s (%d)", mx.Host, mx.Pref))
+	}
+	return HealthResult{
+		Found:  true,
+		Valid:  true,
+		Record: strings.Join(hosts, ", "),
 	}
 }
 
@@ -307,6 +329,55 @@ func (h HealthChecker) CheckDKIM(ctx context.Context, domain, selector string) H
 		Record:  record,
 		Details: details,
 	}
+}
+
+// CheckDKIMKey verifies that the DKIM record published for a selector carries
+// the public half of the private key you sign with.
+//
+// CheckDKIM answers "is a well-formed record published?". That is a weaker
+// question than it looks, because a record can be perfectly valid and belong
+// to a key you retired months ago. Every message you send is then signed with
+// a key nobody publishes, and every receiver records a DKIM failure -- which is
+// a worse signal than not signing at all, and is invisible until a
+// deliverability report arrives.
+//
+// This is the check that catches a rotation applied in one place and not the
+// other. Pass the same key you give to DKIMOptions.
+func (h HealthChecker) CheckDKIMKey(ctx context.Context, domain, selector string, privateKey any) HealthResult {
+	res := h.CheckDKIM(ctx, domain, selector)
+	if !res.Found || res.Error != "" {
+		return res
+	}
+
+	want, err := dkimPublicKeyBase64(privateKey)
+	if err != nil {
+		return HealthResult{
+			Found:   res.Found,
+			Record:  res.Record,
+			Error:   err.Error(),
+			Details: "could not derive the public key from the private key supplied",
+		}
+	}
+
+	got := dkimPublishedKey(res.Record)
+	switch {
+	case got == "":
+		res.Valid = false
+		res.Details = "DKIM record has no p= tag, so nothing can verify a signature"
+	case subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1:
+		res.Valid = true
+		res.Details = "published key matches the signing key"
+	default:
+		res.Valid = false
+		res.Details = "published key does NOT match the signing key: " +
+			"messages signed with this key will fail DKIM verification"
+	}
+	return res
+}
+
+// CheckDKIMKey verifies that the published DKIM record matches a signing key.
+func CheckDKIMKey(ctx context.Context, domain, selector string, privateKey any) HealthResult {
+	return HealthChecker{}.CheckDKIMKey(ctx, domain, selector, privateKey)
 }
 
 func isNotFound(err error) bool {
