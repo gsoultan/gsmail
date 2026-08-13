@@ -3,31 +3,56 @@
 A `v1` tag is a promise: the exported API will not break until `v2`. This is an
 audit of what would be frozen, and what should change first.
 
-> **Status: the changes below have been made.** Everything under "Decided:
-> remove before v1" and "Decided: fix before freezing" is done, with one
-> correction noted inline: `DrainAndClose` stays exported. The audit called for
-> removing it, and that was wrong — every sub-package provider uses it, and an
-> out-of-tree provider needs it alongside `NewHTTPError` to drain a response
-> body on the success path. The two belong together.
+> **Status, as of v0.9.0: every item below is resolved.** Everything under
+> "Decided: remove before v1", "Decided: fix before freezing" and "Decided:
+> freeze as-is" is done, with one correction noted inline: `DrainAndClose`
+> stays exported. The audit called for removing it, and that was wrong — every
+> sub-package provider uses it, and an out-of-tree provider needs it alongside
+> `NewHTTPError` to drain a response body on the success path. The two belong
+> together.
 >
-> The root package went from 204 exported symbols to 180.
+> **And the surface is nonetheless larger than when this was written.** See
+> below. That is now the open question, and it is not the one this document
+> was opened to answer.
 
-Current surface, as of v0.5.0:
+## Surface
 
-| package | exported symbols |
-| --- | --- |
-| `gsmail` (root) | 164 |
-| `outlook` | 20 |
-| `smtp` | 18 |
-| `imap` | 7 |
-| `pop3` | 6 |
-| `ses` / `sendgrid` / `mailgun` / `postmark` | 4 each |
-| `providertest` | 4 |
-| `otelgs` | 3 |
+Measured at v0.5.0 (the version audited) and at v0.9.0 with the same tool:
+exported top-level identifiers plus exported methods on them, excluding
+`internal`, examples and test files. The original table gave 164 for the root
+package by an unstated method, so compare the two columns here rather than
+either against that figure.
 
-164 in one package is too many to freeze deliberately. Twenty of those are the
-deprecated Outlook aliases, which go at v1 by definition. The rest of this
-document is about the remaining ~144.
+| package | v0.5.0 | v0.9.0 | |
+| --- | --- | --- | --- |
+| `gsmail` (root) | 187 | 229 | +42 |
+| `outlook` | 20 | 21 | +1 |
+| `smtp` | 19 | 19 | — |
+| `imap` | 7 | 17 | +10 |
+| `otelgs` | 3 | 17 | +14 |
+| `providertest` | 4 | 14 | +10 |
+| `pop3` | 6 | 6 | — |
+| `ses` / `sendgrid` / `mailgun` / `postmark` | 4 each | 4 each | — |
+| **total** | **262** | **339** | **+77** |
+
+The premise of this document was that the root package was too large to freeze
+deliberately. Four releases of remediation later it is 42 symbols larger. The
+removals happened — all 21 deprecated Outlook aliases and
+`ValidateEmailExistence` are gone, and no package now exports anything marked
+`Deprecated:` — and were outrun by additions roughly three to one.
+
+Nothing in that growth is obviously wrong; `CheckDKIMKey`, `MessageIdentity`
+and the `providertest` field constants each earned their place in a changelog
+entry. That is exactly what makes it worth naming. A surface does not get too
+large through one bad decision, it gets there through a run of individually
+defensible ones, and the audit that was supposed to catch that measured the
+package once and never again.
+
+**Before v1, the useful question is no longer "which symbols should go?" — that
+list is empty and has been acted on. It is whether 229 is a number anyone has
+chosen.** The three packages that grew fastest in relative terms are `otelgs`
+(3 → 17), `providertest` (4 → 14) and `imap` (7 → 17), and the first two are
+instrumentation and test scaffolding rather than the mail API itself.
 
 ---
 
@@ -127,6 +152,46 @@ This entry exists because the fields landed *after* the rest of this document
 was written, and were flagged in a pull request comment rather than here —
 which is exactly how an audit stops being trustworthy.
 
+#### Revisited at v0.9.0: the trigger was watching the wrong thing
+
+No third field appeared, so by the test written above nothing happened. Two
+things happened anyway.
+
+`Email.MessageIdentity` reads `UID` and `Mailbox`, and its own documentation
+opens "returns a stable identifier for a **received** message". It is the first
+*method* on `Email` that is meaningless on the send path — where the two fields
+were inert state a sender could ignore, there is now behaviour whose result
+depends on which half of the API produced the value.
+
+And `Headers` now retains inbound trace headers — `Received`, `DKIM-Signature`,
+`Authentication-Results`, the ARC set — that `BuildMessage` and `CustomHeaders`
+deliberately discard on render. One field, populated by the receive path,
+partially ignored by the send path. It is not a receiver-only field, so it did
+not trip the counter either, but a caller who round-trips a message through
+`Email` does not get the message back.
+
+A trigger phrased as "a third such field" could not see either. Counting fields
+was a proxy for the thing that matters, which is how much of `Email` only makes
+sense in one direction, and the proxy came apart the first time the coupling
+grew by any other means.
+
+**Recommendation: still keep them, and fix the trigger.** The reasoning holds
+and has if anything strengthened — a `Message` superset can still be added
+after v1 without breaking `Email`, so this is a decision that stays cheap to
+revisit, which is the whole reason it was safe to defer. Splitting now would
+add a type and a conversion to a surface that has grown 29% since someone
+called it too big.
+
+The replacement trigger: **split when receive-only surface on `Email` — fields
+and methods together — reaches five, or when any send-path function has to
+consult a receive-only field to do its job.** The second half is the real one.
+Today the two directions share a struct but not a code path; the day a `Sender`
+branches on `UID`, they are one type by accident rather than by choice.
+
+Freeze note for v1: `Email` does not round-trip. `ParseRawEmail` retains
+headers that rendering drops, by design and for good reason, and v1 makes that
+permanent. It should be stated on the type rather than left to be discovered.
+
 ### Mutable exported configuration read during `Send`
 
 `smtp.Sender.Host`, `.AuthMethod`, `.DKIMConfig`, `imap.Receiver.*` and the
@@ -205,13 +270,42 @@ validation helpers are all coherent and worth freezing.
 
 ## Suggested sequence
 
-1. Merge the open hardening PRs; let `main` settle for a release cycle so the
-   v0.5.0 breaks are exercised by real users.
-2. **v0.6.0** — remove `ValidateEmailExistence` and the leaked internal
-   plumbing. Document the mutate-after-Send constraint. Still v0, still cheap
-   to break.
-3. **v1.0.0** — delete the Outlook aliases, stop provider-side sniffing, freeze
-   `providertest`.
+> **Superseded — every step below shipped.** Kept for the record; the current
+> position is in "What is actually left" underneath.
 
-Cutting v1 directly from here would freeze 164 symbols including four that
-should not be public and one design flaw that is actively producing bugs.
+1. ~~Merge the open hardening PRs; let `main` settle for a release cycle so the
+   v0.5.0 breaks are exercised by real users.~~
+2. ~~**v0.6.0** — remove `ValidateEmailExistence` and the leaked internal
+   plumbing. Document the mutate-after-Send constraint.~~ Shipped in v0.6.0.
+3. ~~**v1.0.0** — delete the Outlook aliases, stop provider-side sniffing,
+   freeze `providertest`.~~ The aliases went and the sniffing stopped before
+   v1 rather than at it; `providertest` was settled in v0.9.0.
+
+~~Cutting v1 directly from here would freeze 164 symbols including four that
+should not be public and one design flaw that is actively producing bugs.~~
+That is no longer true. Nothing on the surface is known to be wrong.
+
+## What is actually left
+
+The blocking list is empty. Every symbol this document said to remove is
+removed, every fix it asked for is made, and the one question it left open —
+`providertest`'s implicit zero-value convention — was settled in v0.9.0. On its
+own terms, v1 could be cut today.
+
+Two things argue for one more pass first, and neither is a defect:
+
+1. **229 symbols in the root package, up from 187, none of them chosen as a
+   set.** The audit's premise was that a surface this size cannot be frozen
+   deliberately. Acting on its recommendations did not change that; it changed
+   which symbols make up the number. Someone should read the current list end
+   to end once and say "yes, all of this" — which is a different exercise from
+   hunting for symbols that are individually wrong, and is the one that has
+   never been done.
+
+2. **`Email` does not round-trip, and v1 freezes that.** Documented above.
+   Stating it on the type costs a doc comment; discovering it after v1 costs a
+   caller a debugging session over headers that vanished without an error.
+
+Neither needs a release. Both need somebody to decide on purpose, which is what
+this document was for and what its own first version stopped doing the moment
+its recommendations were carried out and its measurements were not repeated.
