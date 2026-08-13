@@ -42,12 +42,14 @@ func RunSMTP(t *testing.T, h SMTPHarness) {
 		}
 	})
 
+	// SMTP needs no Unsupported list: the suite decodes the delivered message
+	// itself, so every field of Sent is expressed by construction.
 	t.Run("DeliversAllRecipients", func(t *testing.T) {
-		assertRecipients(t, h.capture(t, recipientEmail()))
+		assertRecipients(t, h.capture(t, recipientEmail()), nil)
 	})
 
 	t.Run("RoutesBodiesByField", func(t *testing.T) {
-		assertBodyRouting(t, h.capture(t, bodyRoutingEmail()))
+		assertBodyRouting(t, h.capture(t, bodyRoutingEmail()), nil)
 	})
 
 	// Bcc recipients belong in the envelope only. Writing them into the
@@ -88,11 +90,11 @@ func RunSMTP(t *testing.T, h SMTPHarness) {
 	})
 
 	t.Run("DropsReservedHeaders", func(t *testing.T) {
-		assertReservedHeaders(t, h.capture(t, reservedHeaderEmail()))
+		assertReservedHeaders(t, h.capture(t, reservedHeaderEmail()), nil)
 	})
 
 	t.Run("MarksContentIDAttachmentInline", func(t *testing.T) {
-		assertInlineAttachment(t, h.capture(t, inlineAttachmentEmail()))
+		assertInlineAttachment(t, h.capture(t, inlineAttachmentEmail()), nil)
 	})
 
 	// Every message needs a Date and a Message-ID; some receivers reject mail

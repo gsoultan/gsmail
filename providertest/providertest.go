@@ -24,6 +24,7 @@ package providertest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -44,8 +45,11 @@ type Attachment struct {
 }
 
 // Sent is a provider-agnostic view of one outbound request. A Decode
-// implementation fills in whatever its API expresses; zero values are treated
-// as "this provider does not carry that", and the matching check is skipped.
+// implementation fills in whatever its API expresses.
+//
+// A field left empty is a failure, not a shrug. If the provider's API has no
+// way to express one, say so in Harness.Unsupported; otherwise the suite reads
+// an empty field as the provider having dropped the value.
 type Sent struct {
 	From    string
 	To      []string
@@ -62,6 +66,57 @@ type Sent struct {
 	Attachments []Attachment
 }
 
+// The field names accepted by Harness.Unsupported. Each names the Sent field
+// it gates, except FieldDisposition, which names Attachment.Disposition.
+//
+// There is no constant for Sent.Headers: a provider that cannot carry
+// arbitrary headers sets Harness.SkipHeaderChecks, which drops the three
+// header cases entirely rather than leaving them half-asserted.
+const (
+	FieldTo          = "To"
+	FieldCc          = "Cc"
+	FieldBcc         = "Bcc"
+	FieldSubject     = "Subject"
+	FieldText        = "Text"
+	FieldHTML        = "HTML"
+	FieldAttachments = "Attachments"
+	FieldDisposition = "Disposition"
+)
+
+var knownFields = map[string]bool{
+	FieldTo:          true,
+	FieldCc:          true,
+	FieldBcc:         true,
+	FieldSubject:     true,
+	FieldText:        true,
+	FieldHTML:        true,
+	FieldAttachments: true,
+	FieldDisposition: true,
+}
+
+// unsupported is the set of fields a provider has declared it cannot express.
+type unsupported map[string]bool
+
+// expresses reports whether the provider's view carries field, and so whether
+// the checks that read it should run. The nil set expresses everything.
+func (u unsupported) expresses(field string) bool { return !u[field] }
+
+// newUnsupported validates the declared names and returns them as a set.
+//
+// An unrecognised name is an error rather than a silent no-op. A free-form
+// string that matches nothing would disable a check exactly the way the zero
+// value used to, which is the failure this list exists to remove.
+func newUnsupported(fields []string) (unsupported, error) {
+	u := make(unsupported, len(fields))
+	for _, f := range fields {
+		if !knownFields[f] {
+			return nil, fmt.Errorf("unknown field %q in Harness.Unsupported; use the Field constants", f)
+		}
+		u[f] = true
+	}
+	return u, nil
+}
+
 // Harness adapts one provider to the suite.
 type Harness struct {
 	// Name identifies the provider in test output.
@@ -73,6 +128,20 @@ type Harness struct {
 
 	// Decode converts a captured request into the normalised view.
 	Decode func(t *testing.T, r *http.Request, body []byte) Sent
+
+	// Unsupported lists the Sent fields this provider's API cannot express,
+	// using the Field constants. The checks that read them are skipped; every
+	// other field must arrive.
+	//
+	// It lives here rather than on Sent because it describes the transport,
+	// not one request. A Decode with more than one return path — SES has two,
+	// one per content shape — would otherwise have to repeat the list on each,
+	// and a branch that forgot it would look like a provider dropping fields.
+	//
+	// Declare a field only when the upstream API genuinely has no equivalent.
+	// Listing one because a check is inconvenient turns the suite into a
+	// formality, which is the outcome it was written to prevent.
+	Unsupported []string
 
 	// SuccessStatus is the status a happy-path response should carry.
 	// Defaults to 200.
@@ -177,19 +246,23 @@ func Run(t *testing.T, h Harness) {
 	if h.NewSender == nil || h.Decode == nil {
 		t.Fatal("providertest: Harness needs both NewSender and Decode")
 	}
+	u, err := newUnsupported(h.Unsupported)
+	if err != nil {
+		t.Fatalf("providertest: %v", err)
+	}
 
-	t.Run("DeliversBasicMessage", func(t *testing.T) { testBasic(t, h) })
-	t.Run("DeliversAllRecipients", func(t *testing.T) { testRecipients(t, h) })
-	t.Run("RoutesBodiesByField", func(t *testing.T) { testBodyRouting(t, h) })
+	t.Run("DeliversBasicMessage", func(t *testing.T) { testBasic(t, h, u) })
+	t.Run("DeliversAllRecipients", func(t *testing.T) { testRecipients(t, h, u) })
+	t.Run("RoutesBodiesByField", func(t *testing.T) { testBodyRouting(t, h, u) })
 
 	if !h.SkipHeaderChecks {
 		t.Run("ForwardsCustomHeaders", func(t *testing.T) { testCustomHeaders(t, h) })
-		t.Run("DropsReservedHeaders", func(t *testing.T) { testReservedHeaders(t, h) })
+		t.Run("DropsReservedHeaders", func(t *testing.T) { testReservedHeaders(t, h, u) })
 		t.Run("RejectsIllegalHeaderName", func(t *testing.T) { testIllegalHeaderName(t, h) })
 	}
 
 	if !h.SkipInlineAttachmentCheck {
-		t.Run("MarksContentIDAttachmentInline", func(t *testing.T) { testInlineAttachment(t, h) })
+		t.Run("MarksContentIDAttachmentInline", func(t *testing.T) { testInlineAttachment(t, h, u) })
 	}
 
 	if !h.SkipRetryChecks {
@@ -203,16 +276,16 @@ func Run(t *testing.T, h Harness) {
 	t.Run("RespectsContextCancellation", func(t *testing.T) { testContextCancel(t, h) })
 }
 
-func testBasic(t *testing.T, h Harness) {
+func testBasic(t *testing.T, h Harness, u unsupported) {
 	got := h.capture(t, basicEmail())
 
-	if got.Subject != "" && got.Subject != "conformance" {
+	if u.expresses(FieldSubject) && got.Subject != "conformance" {
 		t.Errorf("Subject = %q, want %q", got.Subject, "conformance")
 	}
-	if got.Text != "" && got.Text != "hello" {
+	if u.expresses(FieldText) && got.Text != "hello" {
 		t.Errorf("Text body = %q, want %q", got.Text, "hello")
 	}
-	if len(got.To) > 0 && got.To[0] != "a@example.com" {
+	if u.expresses(FieldTo) && (len(got.To) != 1 || got.To[0] != "a@example.com") {
 		t.Errorf("To = %v, want [a@example.com]", got.To)
 	}
 }
@@ -231,22 +304,19 @@ func recipientEmail() gsmail.Email {
 }
 
 // Cc and Bcc are quietly dropped surprisingly often.
-func testRecipients(t *testing.T, h Harness) {
-	assertRecipients(t, h.capture(t, recipientEmail()))
+func testRecipients(t *testing.T, h Harness, u unsupported) {
+	assertRecipients(t, h.capture(t, recipientEmail()), u)
 }
 
-func assertRecipients(t *testing.T, got Sent) {
+func assertRecipients(t *testing.T, got Sent, u unsupported) {
 	t.Helper()
-	if len(got.To) > 0 && len(got.To) != 2 {
+	if u.expresses(FieldTo) && len(got.To) != 2 {
 		t.Errorf("To = %v, want 2 recipients", got.To)
 	}
-	if len(got.Cc) == 0 && len(got.Bcc) == 0 {
-		t.Skip("provider view exposes neither Cc nor Bcc")
-	}
-	if len(got.Cc) != 1 {
+	if u.expresses(FieldCc) && len(got.Cc) != 1 {
 		t.Errorf("Cc = %v, want 1 recipient", got.Cc)
 	}
-	if len(got.Bcc) != 1 {
+	if u.expresses(FieldBcc) && len(got.Bcc) != 1 {
 		t.Errorf("Bcc = %v, want 1 recipient", got.Bcc)
 	}
 }
@@ -270,21 +340,18 @@ func bodyRoutingEmail() gsmail.Email {
 // for markup, and the heuristic misread ordinary prose: "<p1>" matched "<p",
 // the message went out as text/html, and the recipient's renderer swallowed
 // the pseudo-tag so the sentence lost a word.
-func testBodyRouting(t *testing.T, h Harness) {
+func testBodyRouting(t *testing.T, h Harness, u unsupported) {
 	got := h.capture(t, bodyRoutingEmail())
-	assertBodyRouting(t, got)
+	assertBodyRouting(t, got, u)
 }
 
-func assertBodyRouting(t *testing.T, got Sent) {
+func assertBodyRouting(t *testing.T, got Sent, u unsupported) {
 	t.Helper()
 
-	if got.Text == "" && got.HTML == "" {
-		t.Skip("provider view exposes neither body")
-	}
-	if got.Text != "" && !strings.Contains(got.Text, "<p1>") {
+	if u.expresses(FieldText) && !strings.Contains(got.Text, "<p1>") {
 		t.Errorf("text/plain body = %q, want the Body field verbatim", got.Text)
 	}
-	if got.HTML != "" && !strings.Contains(got.HTML, "<p>Please review") {
+	if u.expresses(FieldHTML) && !strings.Contains(got.HTML, "<p>Please review") {
 		t.Errorf("text/html body = %q, want the HTMLBody field", got.HTML)
 	}
 	if strings.Contains(got.HTML, "<p1>") {
@@ -315,8 +382,8 @@ func assertCustomHeaders(t *testing.T, got Sent) {
 
 // Headers the provider generates itself must not be duplicated or overridden
 // through Email.Headers.
-func testReservedHeaders(t *testing.T, h Harness) {
-	assertReservedHeaders(t, h.capture(t, reservedHeaderEmail()))
+func testReservedHeaders(t *testing.T, h Harness, u unsupported) {
+	assertReservedHeaders(t, h.capture(t, reservedHeaderEmail()), u)
 }
 
 // reservedHeaderEmail tries to override headers the transport generates.
@@ -328,7 +395,7 @@ func reservedHeaderEmail() gsmail.Email {
 	return e
 }
 
-func assertReservedHeaders(t *testing.T, got Sent) {
+func assertReservedHeaders(t *testing.T, got Sent, u unsupported) {
 	t.Helper()
 	for _, reserved := range []string{"Subject", "From", "To", "Cc", "Bcc"} {
 		if _, leaked := got.Headers[reserved]; leaked {
@@ -338,7 +405,7 @@ func assertReservedHeaders(t *testing.T, got Sent) {
 	if got.Headers["X-Kept"] != "yes" {
 		t.Error("filtering reserved headers must not drop the legitimate ones")
 	}
-	if got.Subject != "" && got.Subject != "conformance" {
+	if u.expresses(FieldSubject) && got.Subject != "conformance" {
 		t.Errorf("Subject was overridden through Headers: %q", got.Subject)
 	}
 }
@@ -370,8 +437,8 @@ func testIllegalHeaderName(t *testing.T, h Harness) {
 // An attachment with a Content-ID is referenced from the HTML by cid:. Sending
 // it as a plain attachment leaves the image broken in the body and duplicated
 // at the bottom of the message.
-func testInlineAttachment(t *testing.T, h Harness) {
-	assertInlineAttachment(t, h.capture(t, inlineAttachmentEmail()))
+func testInlineAttachment(t *testing.T, h Harness, u unsupported) {
+	assertInlineAttachment(t, h.capture(t, inlineAttachmentEmail()), u)
 }
 
 // inlineAttachmentEmail pairs a cid:-referenced image with a plain attachment.
@@ -385,19 +452,19 @@ func inlineAttachmentEmail() gsmail.Email {
 	return e
 }
 
-func assertInlineAttachment(t *testing.T, got Sent) {
+func assertInlineAttachment(t *testing.T, got Sent, u unsupported) {
 	t.Helper()
-	if len(got.Attachments) == 0 {
-		t.Skip("provider view does not expose attachments")
+	if !u.expresses(FieldAttachments) {
+		return
 	}
 	if len(got.Attachments) != 2 {
 		t.Fatalf("got %d attachments, want 2", len(got.Attachments))
 	}
+	if !u.expresses(FieldDisposition) {
+		return
+	}
 
 	for _, att := range got.Attachments {
-		if att.Disposition == "" {
-			t.Skip("provider view does not expose attachment disposition")
-		}
 		switch att.Filename {
 		case "logo.png":
 			if att.Disposition != "inline" {

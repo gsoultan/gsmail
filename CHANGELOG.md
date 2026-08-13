@@ -10,7 +10,56 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
 
 ## [Unreleased]
 
+## [v0.9.0]
+
+### Breaking
+
+- **Trace headers set through `Email.Headers` are no longer rendered.**
+  `Received`, `Return-Path`, `Delivered-To`, `DKIM-Signature`,
+  `Authentication-Results` and the ARC set are dropped by `BuildMessage` and
+  `CustomHeaders`. A caller who set one by hand and expected it on the wire
+  loses it silently. See "Changed" below for why.
+
+- **`providertest` reads an empty `Sent` field as a dropped value.** It used to
+  treat the zero value as "this transport cannot express that" and skip the
+  check. A provider that was quietly dropping Cc, Bcc, a body or an attachment
+  disposition passed the suite; it now fails. If the API genuinely has no
+  equivalent, name the field in `Harness.Unsupported`.
+
+  All five in-tree providers pass unchanged, so this is only a break for
+  out-of-tree implementations — and only for the ones it is about.
+
 ### Added
+
+- **`providertest.Harness.Unsupported`**, with the `Field*` constants naming
+  what may go in it. The zero-value convention it replaces was invisible in
+  both directions: a suite that skipped a check looked exactly like a suite
+  that ran it, and a provider dropping a field looked exactly like an API
+  without one.
+
+  It sits on `Harness` rather than `Sent` because it describes the transport,
+  not one request — SES picks its content shape per message and its `Decode`
+  has two return paths, so on `Sent` the list would have to be repeated on
+  both, and the branch that forgot would look like a provider dropping fields.
+
+  An unrecognised name is rejected rather than ignored: a string that matches
+  nothing disables no check and skips no check while looking deliberate, which
+  is the original failure in better clothes.
+
+- **`CheckDKIMKey`** verifies that the DKIM record published for a selector
+  carries the public half of the key you actually sign with, and
+  **`DKIMPublicKeyRecord`** derives the record a private key should publish.
+
+  `CheckDKIM` only answers "is a well-formed record published?", which is a
+  weaker question than it looks: a record can be perfectly valid and belong to
+  a key retired months ago. Every message is then signed with a key nobody
+  publishes and every receiver records a DKIM failure — worse than not signing
+  at all, and invisible until a deliverability report arrives. This is the
+  check that catches a rotation applied in one place and not the other.
+
+- **`CheckMX`**, matching the `CheckSPF`, `CheckDMARC` and `CheckDKIM` pair of
+  method and package function. The MX lookup was inline in
+  `CheckDomainHealth` and could not be called on its own.
 
 - **`ParseRawEmail` now retains the headers `Email` does not model.** It kept
   only From, To, Cc, Subject and Reply-To, so an inbound message lost its
@@ -43,21 +92,6 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
   delivery chain or a signature it did not earn is forging its own provenance.
   `In-Reply-To` and `References` do survive, since a reply should carry them.
 
-- **`CheckDKIMKey`** verifies that the DKIM record published for a selector
-  carries the public half of the key you actually sign with, and
-  **`DKIMPublicKeyRecord`** derives the record a private key should publish.
-
-  `CheckDKIM` only answers "is a well-formed record published?", which is a
-  weaker question than it looks: a record can be perfectly valid and belong to
-  a key retired months ago. Every message is then signed with a key nobody
-  publishes and every receiver records a DKIM failure — worse than not signing
-  at all, and invisible until a deliverability report arrives. This is the
-  check that catches a rotation applied in one place and not the other.
-
-- **`CheckMX`**, matching the `CheckSPF`, `CheckDMARC` and `CheckDKIM` pair of
-  method and package function. The MX lookup was inline in
-  `CheckDomainHealth` and could not be called on its own.
-
 ### Fixed
 
 - **A nonexistent domain reported an error from the MX check** while SPF and
@@ -70,6 +104,29 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
 - Removed `outlookNamespaces`, left behind when the namespace injection moved
   to a per-namespace table to make conversion idempotent. staticcheck flags it
   as unused, so CI would have failed on the next run.
+
+## [v0.8.5]
+
+Recorded after the fact: the tag was cut without a changelog entry.
+
+### Fixed
+
+- **`outlook.ToOutlookHTML` declared `xmlns:v` and `xmlns:o` twice.** They were
+  appended to `<html>` unconditionally, so a document that already declared
+  them — as any generator emitting VML must — came out with each duplicated.
+  Duplicate attributes are invalid; parsers keep the first and discard the
+  rest, which is why it went unnoticed.
+
+- **`outlook.ToOutlookHTML` is idempotent.** A second pass re-appended the head
+  tags, the mso block, the container table and the body holder, growing a 3.5 KB
+  document to 6.7 KB and further on each pass. A pipeline that hardened at more
+  than one point therefore shipped a message far larger than it needed to be,
+  which matters because Gmail clips at 102 KB and drops everything after the cut.
+
+### Added
+
+- **`outlook.AlreadyConverted`**, so a caller can ask whether a document has
+  been through the conversion rather than guess.
 
 ## [v0.8.4]
 
