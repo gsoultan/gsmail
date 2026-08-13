@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the module is at `v0`, breaking changes ship in minor releases. Read the
 **Breaking** section before upgrading.
 
+## [Unreleased]
+
+### Added
+
+- **`CheckDKIMKey`** verifies that the DKIM record published for a selector
+  carries the public half of the key you actually sign with, and
+  **`DKIMPublicKeyRecord`** derives the record a private key should publish.
+
+  `CheckDKIM` only answers "is a well-formed record published?", which is a
+  weaker question than it looks: a record can be perfectly valid and belong to
+  a key retired months ago. Every message is then signed with a key nobody
+  publishes and every receiver records a DKIM failure — worse than not signing
+  at all, and invisible until a deliverability report arrives. This is the
+  check that catches a rotation applied in one place and not the other.
+
+- **`CheckMX`**, matching the `CheckSPF`, `CheckDMARC` and `CheckDKIM` pair of
+  method and package function. The MX lookup was inline in
+  `CheckDomainHealth` and could not be called on its own.
+
+### Fixed
+
+- **A nonexistent domain reported an error from the MX check** while SPF and
+  DMARC reported "not found" for the same domain. One unconfigured domain
+  therefore produced two "not configured" verdicts and one failure, which
+  reads as an outage rather than as a domain nobody has set up. MX now uses
+  the same `isNotFound` treatment as its siblings; a genuine resolver failure
+  is still an error.
+
+- Removed `outlookNamespaces`, left behind when the namespace injection moved
+  to a per-namespace table to make conversion idempotent. staticcheck flags it
+  as unused, so CI would have failed on the next run.
+
 ## [v0.8.4]
 
 ### Fixed
