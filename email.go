@@ -17,6 +17,19 @@ type Attachment struct {
 }
 
 // Email represents an email message.
+//
+// One Email describes both a message you are sending and one you have
+// received, which means it does not round-trip: rendering a parsed message
+// does not reproduce the bytes it was parsed from. ParseRawEmail retains the
+// trace headers that record how a message travelled — Received, Return-Path,
+// DKIM-Signature, Authentication-Results and the ARC set — so an inbound
+// message can be inspected, and BuildMessage drops them again, because a new
+// message asserting a delivery chain or a signature it did not earn is forging
+// its own provenance. The drop is silent; nothing has gone wrong.
+//
+// UID and Mailbox are likewise set by receivers and ignored by every Sender,
+// and MessageIdentity reads them, so its answer depends on where the Email
+// came from.
 type Email struct {
 	// UID identifies the message on the server it was fetched from. It is set
 	// by receivers that expose a stable identifier (IMAP) and is required by
