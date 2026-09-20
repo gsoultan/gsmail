@@ -902,7 +902,22 @@ func FormatAddress(s string) string {
 // cannot appear in a header field or an SMTP command.
 var ErrIllegalAddress = errors.New("gsmail: address contains an illegal character")
 
+// ErrEmptyAddress is returned for an address with nothing in it.
+var ErrEmptyAddress = errors.New("gsmail: address is empty")
+
 // ParseEmailAddress parses an email address that can be in the form of "Name <email@example.com>" or just "email@example.com".
+//
+// A nil result always comes with a non-nil error. The empty string used to
+// return (nil, nil), which reads as success: the idiomatic
+//
+//	a, err := ParseEmailAddress(s)
+//	if err != nil { return err }
+//	use(a.Address)
+//
+// then dereferences nil. Every caller inside this module had to write
+// "err == nil && a != nil" to stay safe, which is the signature admitting the
+// problem rather than a caller being careless. An empty address is now
+// ErrEmptyAddress.
 //
 // An address carrying a control character is rejected outright. The lenient
 // fallback below exists for real headers that net/mail will not accept -- an
@@ -913,7 +928,7 @@ var ErrIllegalAddress = errors.New("gsmail: address contains an illegal characte
 // a downstream library's check for a value this one produced is not a defence.
 func ParseEmailAddress(s string) (*mail.Address, error) {
 	if s == "" {
-		return nil, nil
+		return nil, ErrEmptyAddress
 	}
 	if strings.ContainsFunc(s, isIllegalHeaderRune) {
 		return nil, ErrIllegalAddress
