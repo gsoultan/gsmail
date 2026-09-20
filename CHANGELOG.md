@@ -10,6 +10,22 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
 
 ## [Unreleased]
 
+### Changed
+
+- **The minimum Go version is now 1.27.1**, up from 1.25.12.
+
+  Go supports the two most recent major releases. With 1.27 out, the 1.25
+  series is end-of-life: the seven standard-library advisories the scanner
+  was reporting against the old floor are fixed in go1.25.13, but nothing
+  after that will be, so a 1.25 floor drifts back to red and stays there.
+
+  The floor is also what the linters run on. CI resolves every job's
+  toolchain from this directive with `GOTOOLCHAIN=local`, and both
+  `staticcheck` (v0.8.1) and `golang.org/x/vuln` (v1.8.0) now require Go
+  1.26 or newer. On a 1.25 floor neither tool would install, so both jobs
+  failed before they analyzed a single line — the failure looked like a
+  finding and was really a toolchain floor.
+
 ## [v0.9.1]
 
 ### Fixed
