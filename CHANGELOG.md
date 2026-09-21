@@ -10,6 +10,8 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
 
 ## [Unreleased]
 
+## [v0.10.0]
+
 ### Breaking
 
 - **`ParseEmailAddress("")` returns `ErrEmptyAddress` instead of `(nil, nil)`.**
@@ -52,6 +54,10 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
   1.26 or newer. On a 1.25 floor neither tool would install, so both jobs
   failed before they analyzed a single line — the failure looked like a
   finding and was really a toolchain floor.
+
+- Dependency updates: the AWS SDK (`aws-sdk-go-v2` 1.43.4 → 1.47.0, `config`
+  1.32.35 → 1.33.5, `credentials` 1.19.34 → 1.20.5, `s3` 1.106.5 → 1.113.1,
+  `sesv2` 1.66.4 → 1.74.0) and OpenTelemetry 1.45.0 → 1.46.0.
 
 ## [v0.9.1]
 
