@@ -4,6 +4,11 @@ on:
   push:
     branches: [ main, master ]
   pull_request:
+  # A push to main does not always produce a run -- 2c73623 landed on main and
+  # GitHub created no run for it at all, leaving the branch untested with no
+  # way to ask for one. Every other trigger here is a thing that happened to
+  # the repository; this is the one that lets a person say "test it anyway".
+  workflow_dispatch:
 
 permissions:
   contents: read
