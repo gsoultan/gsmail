@@ -98,3 +98,21 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+
+  surface:
+    # The v1 audit measured the exported API by hand, twice, and the second
+    # pass missed a whole package. Freezing a surface at v1 is a promise held
+    # until v2, so the number is checked on every push rather than whenever
+    # somebody remembers to look.
+    name: surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check the exported API against its budget
+        run: go run ./internal/cmd/surface -check docs/surface-budget.txt

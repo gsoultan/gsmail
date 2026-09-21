@@ -3,7 +3,7 @@
 A `v1` tag is a promise: the exported API will not break until `v2`. This is an
 audit of what would be frozen, and what should change first.
 
-> **Status, as of v0.9.0: every item below is resolved.** Everything under
+> **Status, as of v0.10.0: every item below is resolved.** Everything under
 > "Decided: remove before v1", "Decided: fix before freezing" and "Decided:
 > freeze as-is" is done, with one correction noted inline: `DrainAndClose`
 > stays exported. The audit called for removing it, and that was wrong — every
@@ -12,31 +12,43 @@ audit of what would be frozen, and what should change first.
 > together.
 >
 > **And the surface is nonetheless larger than when this was written.** See
-> below. That is now the open question, and it is not the one this document
-> was opened to answer.
+> below. That was the open question, and it is not the one this document was
+> opened to answer.
+>
+> **As of v0.10.0 it is no longer open.** The surface is measured by
+> `internal/cmd/surface`, budgeted in `docs/surface-budget.txt`, and checked
+> by CI on every push. Growth is still allowed; going unnoticed is not.
 
 ## Surface
 
-Measured at v0.5.0 (the version audited) and at v0.9.0 with the same tool:
-exported top-level identifiers plus exported methods on them, excluding
-`internal`, examples and test files. The original table gave 164 for the root
-package by an unstated method, so compare the two columns here rather than
-either against that figure.
+Measured at v0.5.0, v0.9.0 and v0.10.0. The method is no longer a sentence in
+a document — it is `internal/cmd/surface`, and it is stated at the top of that
+file: exported top-level identifiers, exported methods on exported receivers,
+exported interface methods, excluding `internal`, examples, `main` and test
+files. Re-run it with `go run ./internal/cmd/surface`.
 
-| package | v0.5.0 | v0.9.0 | |
-| --- | --- | --- | --- |
-| `gsmail` (root) | 187 | 229 | +42 |
-| `outlook` | 20 | 21 | +1 |
-| `smtp` | 19 | 19 | — |
-| `imap` | 7 | 17 | +10 |
-| `otelgs` | 3 | 17 | +14 |
-| `providertest` | 4 | 14 | +10 |
-| `pop3` | 6 | 6 | — |
-| `ses` / `sendgrid` / `mailgun` / `postmark` | 4 each | 4 each | — |
-| **total** | **262** | **339** | **+77** |
+> **The v0.9.0 column was wrong, and wrong in the way this section is about.**
+> It omitted `gsmailtest` entirely — 29 exported symbols, public and
+> documented since v0.8.0, featured in the README, and frozen by v1 exactly
+> like everything else. The stated total of 339 undercounts by 27. The
+> corrected figures are below; the original per-package numbers reproduce to
+> within one or two symbols, so only the total moves materially.
+
+| package | v0.5.0 | v0.9.0 | v0.10.0 | since v0.5.0 |
+| --- | --- | --- | --- | --- |
+| `gsmail` (root) | 189 | 228 | 229 | +40 |
+| `gsmailtest` | — | 27 | 29 | **+29, never counted before** |
+| `outlook` | 20 | 21 | 21 | +1 |
+| `smtp` | 19 | 19 | 19 | — |
+| `imap` | 7 | 17 | 17 | +10 |
+| `otelgs` | 3 | 17 | 17 | +14 |
+| `providertest` | 4 | 14 | 14 | +10 |
+| `pop3` | 6 | 6 | 6 | — |
+| `ses` / `sendgrid` / `mailgun` / `postmark` | 4 each | 4 each | 4 each | — |
+| **total** | **264** | **367** | **368** | **+104 (+39%)** |
 
 The premise of this document was that the root package was too large to freeze
-deliberately. Four releases of remediation later it is 42 symbols larger. The
+deliberately. Five releases of remediation later it is 40 symbols larger. The
 removals happened — all 21 deprecated Outlook aliases and
 `ValidateEmailExistence` are gone, and no package now exports anything marked
 `Deprecated:` — and were outrun by additions roughly three to one.
@@ -50,7 +62,23 @@ package once and never again.
 
 **Before v1, the useful question is no longer "which symbols should go?" — that
 list is empty and has been acted on. It is whether 229 is a number anyone has
-chosen.** The three packages that grew fastest in relative terms are `otelgs`
+chosen.**
+
+That question now has an answer, and it is no. It could not have been chosen,
+because the instrument was not pointed at the whole surface: two audits ran and
+neither saw `gsmailtest`. Growth of 39% is the headline, but the measurement
+gap is the finding — a number nobody re-derives is not a budget, it is a
+memory.
+
+So the count is enforced rather than recorded. `docs/surface-budget.txt` holds
+the number for each package and CI fails when the code disagrees with it. The
+check is indifferent to which direction the drift goes; what it will not allow
+is drift nobody wrote down. Adding an export now means editing that file in the
+same commit, and that edit is the act this document has been asking for since
+v0.5.0 — not a smaller surface, a chosen one.
+
+The first entry it caught was its own release: `ErrEmptyAddress` took the root
+package from 228 to 229 in v0.10.0. The three packages that grew fastest in relative terms are `otelgs`
 (3 → 17), `providertest` (4 → 14) and `imap` (7 → 17), and the first two are
 instrumentation and test scaffolding rather than the mail API itself.
 

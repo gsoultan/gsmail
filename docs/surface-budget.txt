@@ -1,0 +1,31 @@
+# Exported API budget, per package.
+#
+# CI fails when a number here disagrees with what the code actually exports.
+# The fix is not to game the check -- it is to edit the number in the same
+# commit that changes the API. That edit is the whole point. It is the moment
+# the size of the public surface stops being the sum of individually
+# reasonable additions and becomes something a person chose.
+#
+# Regenerate the right-hand column with:
+#
+#	go run ./internal/cmd/surface
+#
+# Counting method is documented at the top of internal/cmd/surface/main.go.
+# Do not re-derive it by hand; that is how gsmailtest went 29 symbols
+# unmeasured through two audits.
+#
+# Growth is not forbidden. It is only required to be deliberate, and at v1 it
+# also becomes permanent: every line below is a promise held until v2.
+
+gsmail (root)    229
+gsmailtest        29
+imap              17
+mailgun            4
+otelgs            17
+outlook           21
+pop3               6
+postmark           4
+providertest      14
+sendgrid           4
+ses                4
+smtp              19
