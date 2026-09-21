@@ -10,6 +10,33 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
 
 ## [Unreleased]
 
+### Breaking
+
+- **`ParseEmailAddress("")` returns `ErrEmptyAddress` instead of `(nil, nil)`.**
+
+  A nil result with a nil error reads as success, so the idiomatic
+
+  ```go
+  a, err := ParseEmailAddress(s)
+  if err != nil { return err }
+  use(a.Address)
+  ```
+
+  dereferenced nil whenever `s` was empty, and nothing in the signature warned
+  anyone. Every call site inside this module already wrote
+  `err == nil && a != nil` to stay upright — five of them — which is the
+  signature admitting the problem rather than five careless callers.
+
+  A nil address now always comes with a non-nil error, and that is the contract
+  a test pins across the input space rather than for the empty string alone.
+
+  **Who this affects.** Only a caller that relied on `(nil, nil)` to mean "no
+  address, no problem" and branched on the nil rather than the error. A caller
+  already checking `err` gets an error where it previously got a panic. Nothing
+  inside this module changes behaviour: every internal caller skips on
+  `a == nil` and on `err != nil` alike. `NormalizeAddress("")` still returns
+  `""`, and `FormatAddress("")` still returns `""`.
+
 ### Changed
 
 - **The minimum Go version is now 1.27.1**, up from 1.25.12.
