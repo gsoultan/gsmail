@@ -10,6 +10,41 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
 
 ## [Unreleased]
 
+### Breaking
+
+- **Nine package-level convenience functions are removed:** `Receive`,
+  `Search`, `Idle`, `Validate`, `CheckMX`, `CheckSPF`, `CheckDMARC`,
+  `CheckDKIM` and `CheckDKIMKey`.
+
+  The root package exposed a facade — a package-level function beside the
+  method it delegates to, so `gsmail.Send(ctx, sender, email)` reads as well as
+  `sender.Send(ctx, email)`. That is a deliberate shape and it stays. What was
+  not deliberate is how far it went: twelve functions existed, three were
+  taught anywhere, and the other nine were there for symmetry. `v1` would have
+  frozen all twelve.
+
+  **Who this affects.** `Send`, `Ping` and `CheckDomainHealth` — every
+  package-level call the README or package documentation shows — are
+  unchanged. A caller using one of the nine has a direct replacement and no
+  loss of capability:
+
+  ```go
+  gsmail.Receive(ctx, r, limit)   →  r.Receive(ctx, limit)
+  gsmail.Search(ctx, r, opts, n)  →  r.Search(ctx, opts, n)
+  gsmail.Idle(ctx, r)             →  r.Idle(ctx)
+  gsmail.CheckSPF(ctx, domain)    →  gsmail.HealthChecker{}.CheckSPF(ctx, domain)
+  ```
+
+  Two are worth calling out because they were not pure delegation. `Idle`
+  returned a pair of closed channels carrying an error when handed a nil
+  receiver; a caller relying on that now needs its own nil check. `Validate`
+  type-asserted its argument to `AddressValidator` and reported an error when
+  the assertion failed — `AddressValidator` is exported, so the assertion moves
+  to the caller rather than disappearing.
+
+  The root package goes from 229 exported symbols to 220, recorded in
+  `docs/surface-budget.txt`.
+
 ## [v0.10.0]
 
 ### Breaking

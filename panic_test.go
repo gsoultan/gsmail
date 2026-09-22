@@ -15,13 +15,6 @@ func TestPanicResistance(t *testing.T) {
 		}
 	})
 
-	t.Run("ReceiveNilReceiver", func(t *testing.T) {
-		_, err := gsmail.Receive(context.Background(), nil, 10)
-		if err == nil {
-			t.Error("expected error for nil receiver, got nil")
-		}
-	})
-
 	t.Run("PingNilProvider", func(t *testing.T) {
 		err := gsmail.Ping(context.Background(), nil)
 		if err == nil {
