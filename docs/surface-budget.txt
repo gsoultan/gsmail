@@ -17,7 +17,7 @@
 # Growth is not forbidden. It is only required to be deliberate, and at v1 it
 # also becomes permanent: every line below is a promise held until v2.
 
-gsmail (root)    229
+gsmail (root)    220
 gsmailtest        29
 imap              17
 mailgun            4

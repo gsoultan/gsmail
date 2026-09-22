@@ -47,26 +47,6 @@ func CheckDomainHealth(ctx context.Context, domain string, selectors []string) (
 	return HealthChecker{}.CheckDomainHealth(ctx, domain, selectors)
 }
 
-// CheckMX retrieves the MX records for a domain.
-func CheckMX(ctx context.Context, domain string) HealthResult {
-	return HealthChecker{}.CheckMX(ctx, domain)
-}
-
-// CheckSPF retrieves and validates the SPF record for a domain.
-func CheckSPF(ctx context.Context, domain string) HealthResult {
-	return HealthChecker{}.CheckSPF(ctx, domain)
-}
-
-// CheckDMARC retrieves and validates the DMARC record for a domain.
-func CheckDMARC(ctx context.Context, domain string) HealthResult {
-	return HealthChecker{}.CheckDMARC(ctx, domain)
-}
-
-// CheckDKIM retrieves and validates a DKIM record for a domain and selector.
-func CheckDKIM(ctx context.Context, domain, selector string) HealthResult {
-	return HealthChecker{}.CheckDKIM(ctx, domain, selector)
-}
-
 // CheckDomainHealth performs comprehensive DNS health checks for the given domain.
 func (h HealthChecker) CheckDomainHealth(ctx context.Context, domain string, selectors []string) (DomainHealth, error) {
 	if domain == "" {
@@ -379,11 +359,6 @@ func (h HealthChecker) CheckDKIMKey(ctx context.Context, domain, selector string
 			"messages signed with this key will fail DKIM verification"
 	}
 	return res
-}
-
-// CheckDKIMKey verifies that the published DKIM record matches a signing key.
-func CheckDKIMKey(ctx context.Context, domain, selector string, privateKey any) HealthResult {
-	return HealthChecker{}.CheckDKIMKey(ctx, domain, selector, privateKey)
 }
 
 func isNotFound(err error) bool {
