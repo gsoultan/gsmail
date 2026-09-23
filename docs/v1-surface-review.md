@@ -21,15 +21,20 @@ than a promise.
 
 ## Documentation coverage
 
-Every exported declaration in the root package carries a doc comment — 204 of
-204. That was not true when this review was written: `ParseRawEmail` and
-`HTTPError.Error` were bare, and `ParseRawEmail` was being *referenced by*
-`Email`'s doc comment while carrying none of its own. Both now have one.
+Every exported declaration in every package carries a doc comment — **341 of
+341**. Five were bare when this review was written, and two of those were
+functions that other doc comments were already pointing at:
 
-This matters for the read-through more than it looks. "Yes, all of this" is a
-claim about behaviour, not names, and a symbol nobody has described is one
-nobody can agree to freeze. Regenerate the check with the same walk the budget
-uses if it is ever in doubt.
+| symbol | |
+| --- | --- |
+| `ParseRawEmail` | `Email`'s doc explains that it retains trace headers which `BuildMessage` drops; the function itself said nothing |
+| `outlook.ToOutlookHTML` | `AlreadyConverted` is documented as reporting "whether `ToOutlookHTML` has already been applied" |
+| `smtp.ErrPoolClosed`, `smtp.ErrPoolFull` | error sentinels callers match with `errors.Is` |
+| `HTTPError.Error` | self-evident by convention, but a convention is not a description |
+
+This matters for the read-through more than the number suggests. "Yes, all of
+this" is a claim about behaviour, not names, and a symbol nobody has described
+is one nobody can agree to freeze.
 
 ## How to use it
 
@@ -66,17 +71,17 @@ Record the answer per file in the right-hand column.
 
 | package | symbols | reviewed |
 | --- | ---: | --- |
-| `gsmailtest` | 29 | ☐ |
-| `imap` | 17 | ☐ |
-| `mailgun` | 4 | ☐ |
-| `otelgs` | 17 | ☐ |
-| `outlook` | 21 | ☐ |
-| `pop3` | 6 | ☐ |
-| `postmark` | 4 | ☐ |
-| `providertest` | 14 | ☐ |
-| `sendgrid` | 4 | ☐ |
-| `ses` | 4 | ☐ |
-| `smtp` | 19 | ☐ |
+| [`gsmailtest`](#gsmailtest) | 29 | ☐ |
+| [`imap`](#imap) | 17 | ☐ |
+| [`mailgun`](#mailgun) | 4 | ☐ |
+| [`otelgs`](#otelgs) | 17 | ☐ |
+| [`outlook`](#outlook) | 21 | ☐ |
+| [`pop3`](#pop3) | 6 | ☐ |
+| [`postmark`](#postmark) | 4 | ☐ |
+| [`providertest`](#providertest) | 14 | ☐ |
+| [`sendgrid`](#sendgrid) | 4 | ☐ |
+| [`ses`](#ses) | 4 | ☐ |
+| [`smtp`](#smtp) | 19 | ☐ |
 
 ---
 
@@ -417,4 +422,222 @@ BackgroundSender.TrySend [method]
 ErrQueueFull [var]
 ErrSenderStopped [var]
 NewBackgroundSender [func]
+```
+
+---
+
+### gsmailtest
+
+**Test doubles for application authors** — the package that went 29 symbols unmeasured through two surface audits. `NewSender` records messages instead of sending them so a service's tests can assert what it would have sent, without a network or a provider account. Distinct from `providertest`, which serves the other side: people writing a provider. Featured in the README, and frozen by v1 exactly like the rest.
+
+```
+ErrNotDelivered [var]
+NewReceiver [func]
+NewSender [func]
+Receiver [type]
+Receiver.Add [method]
+Receiver.FailWith [method]
+Receiver.Idle [method]
+Receiver.Ping [method]
+Receiver.Push [method]
+Receiver.Receive [method]
+Receiver.Search [method]
+Sender [type]
+Sender.Count [method]
+Sender.FailNextWith [method]
+Sender.FailPingWith [method]
+Sender.FailWith [method]
+Sender.Last [method]
+Sender.MustCount [method]
+Sender.MustLast [method]
+Sender.MustTo [method]
+Sender.OnSend [method]
+Sender.Ping [method]
+Sender.Reset [method]
+Sender.Send [method]
+Sender.Sent [method]
+Sender.To [method]
+TB [type]
+TB.Fatalf [interface method]
+TB.Helper [interface method]
+```
+
+### outlook
+
+**Making HTML survive Microsoft Outlook's renderer.** `ToOutlookHTML` injects the mso conditional block and container table Outlook needs, and is idempotent by design; `AlreadyConverted` tests for the mark. The `MSO*` helpers and `ButtonConfig` cover the constructs that break most often. All twenty-one deprecated forwarders from v0.5.0 are gone — this is the surface that replaced them.
+
+```
+AlreadyConverted [func]
+ButtonConfig [type]
+HideFromMSO [func]
+IsOutlookCompatible [func]
+MSOBackground [func]
+MSOBulletList [func]
+MSOButton [func]
+MSOColumns [func]
+MSOEmailLayout [func]
+MSOEmoji [func]
+MSOFontStack [func]
+MSOImage [func]
+MSOOnly [func]
+MSOPreheader [func]
+MSOPreheaderMaxLength [const]
+MSOPreheaderTruncated [func]
+MSOSafeFontStack [func]
+MSOSpacer [func]
+MSOTable [func]
+ToOutlookHTML [func]
+WrapInGhostTable [func]
+```
+
+### smtp
+
+**The SMTP sender, and the only in-tree provider with a connection pool.** `NewSender`/`Sender` plus `Pool`, `NewPool`, `PoolConfig` and the `ErrPoolClosed`/`ErrPoolFull` pair. `DefaultMinTLSVersion` is exported so a caller can see the floor rather than discover it. The readiness audit flags that `Sender.Host`, `.AuthMethod` and `.DKIMConfig` are read on every send, so mutating a sender mid-flight is a data race — conventional Go, but permanent at v1.
+
+```
+DefaultMinTLSVersion [const]
+ErrPoolClosed [var]
+ErrPoolFull [var]
+NewPool [func]
+NewSender [func]
+Pool [type]
+Pool.Close [method]
+Pool.Get [method]
+Pool.Put [method]
+Pool.Stats [method]
+PoolConfig [type]
+Sender [type]
+Sender.Close [method]
+Sender.EnablePool [method]
+Sender.Ping [method]
+Sender.PoolStats [method]
+Sender.Send [method]
+Sender.UseOAuth [method]
+Stats [type]
+```
+
+### imap
+
+**IMAP receiving, and the richest Receiver.** Beyond `Receive`/`Search`/`Idle` it carries the mailbox operations — `Delete`, `Flag`, `Move`, `SelectMailbox` — which is why it grew 7 → 17 across the audited releases. `ErrNoUIDs` and `Email.UID`/`Mailbox` in the root package are the coupling the readiness doc tracks under receiver-only fields.
+
+```
+DefaultMinTLSVersion [const]
+ErrNoUIDs [var]
+NewReceiver [func]
+Receiver [type]
+Receiver.Delete [method]
+Receiver.Flag [method]
+Receiver.Idle [method]
+Receiver.Mailboxes [method]
+Receiver.MarkDeleted [method]
+Receiver.MarkSeen [method]
+Receiver.MarkUnseen [method]
+Receiver.Move [method]
+Receiver.Ping [method]
+Receiver.Receive [method]
+Receiver.Search [method]
+Receiver.Unflag [method]
+UIDsOf [func]
+```
+
+### otelgs
+
+**OpenTelemetry instrumentation**, and the fastest-growing package in relative terms (3 → 17). Mostly `Metric*` and `Attr*` name constants plus the interceptors. Worth a deliberate look at v1: exported metric and attribute names are a compatibility surface for dashboards, so freezing them is a promise to somebody's alerting, not just to their compiler.
+
+```
+AttrErrorKind [const]
+AttrOutcome [const]
+MetricReceiveCount [const]
+MetricReceivedTotal [const]
+MetricRecipients [const]
+MetricSendBytes [const]
+MetricSendCount [const]
+MetricSendDuration [const]
+Metrics [type]
+Metrics.ReceiveInterceptor [method]
+Metrics.SendInterceptor [method]
+NewMetrics [func]
+ReceiveInterceptor [func]
+ReceiveMetricsInterceptor [func]
+SendInterceptor [func]
+SendMetricsInterceptor [func]
+VerboseSendInterceptor [func]
+```
+
+### providertest
+
+**The conformance suite a provider author runs** to prove a `Sender` obeys the library's contract. `Harness`, `SMTPHarness`, and the `Field*` constants that let a provider declare what its API genuinely cannot carry — settled in v0.9.0, so an undeclared empty field now fails rather than silently skipping.
+
+```
+Attachment [type]
+FieldAttachments [const]
+FieldBcc [const]
+FieldCc [const]
+FieldDisposition [const]
+FieldHTML [const]
+FieldSubject [const]
+FieldText [const]
+FieldTo [const]
+Harness [type]
+Run [func]
+RunSMTP [func]
+SMTPHarness [type]
+Sent [type]
+```
+
+### pop3
+
+**POP3 receiving** — the minimal `Receiver`. Six symbols, unchanged since v0.5.0, and the one package here that has never moved.
+
+```
+NewReceiver [func]
+Receiver [type]
+Receiver.Idle [method]
+Receiver.Ping [method]
+Receiver.Receive [method]
+Receiver.Search [method]
+```
+
+### ses
+
+**Amazon SES sender.** `NewSender`, `Sender`, `Send`, `Ping` — the four-symbol shape every HTTP provider in this module shares.
+
+```
+NewSender [func]
+Sender [type]
+Sender.Ping [method]
+Sender.Send [method]
+```
+
+### sendgrid
+
+**SendGrid sender.** Same four-symbol shape.
+
+```
+NewSender [func]
+Sender [type]
+Sender.Ping [method]
+Sender.Send [method]
+```
+
+### mailgun
+
+**Mailgun sender.** Same four-symbol shape.
+
+```
+NewSender [func]
+Sender [type]
+Sender.Ping [method]
+Sender.Send [method]
+```
+
+### postmark
+
+**Postmark sender.** Same four-symbol shape.
+
+```
+NewSender [func]
+Sender [type]
+Sender.Ping [method]
+Sender.Send [method]
 ```
