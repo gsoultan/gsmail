@@ -322,17 +322,31 @@ own terms, v1 could be cut today.
 
 Two things argue for one more pass first, and neither is a defect:
 
-1. **229 symbols in the root package, up from 187, none of them chosen as a
-   set.** The audit's premise was that a surface this size cannot be frozen
-   deliberately. Acting on its recommendations did not change that; it changed
-   which symbols make up the number. Someone should read the current list end
-   to end once and say "yes, all of this" — which is a different exercise from
-   hunting for symbols that are individually wrong, and is the one that has
-   never been done.
+1. **220 symbols in the root package, none of them chosen as a set.** The
+   audit's premise was that a surface this size cannot be frozen deliberately.
+   Acting on its recommendations did not change that; it changed which symbols
+   make up the number. Someone should read the current list end to end once and
+   say "yes, all of this" — which is a different exercise from hunting for
+   symbols that are individually wrong, and is the one that has never been
+   done.
 
-2. **`Email` does not round-trip, and v1 freezes that.** Documented above.
-   Stating it on the type costs a doc comment; discovering it after v1 costs a
-   caller a debugging session over headers that vanished without an error.
+   **Still open, and now possible.** The list is in
+   `docs/v1-surface-review.md`, regenerable and per-file; the count is
+   enforced by CI so it cannot drift away from whatever is signed off. The
+   count moved 229 → 220 in v0.11.0, which removed nine package-level
+   functions that no documentation mentioned — that was the
+   hunting-for-individually-wrong-symbols exercise, not this one.
+
+2. ~~**`Email` does not round-trip, and v1 freezes that.** Stating it on the
+   type costs a doc comment; discovering it after v1 costs a caller a debugging
+   session over headers that vanished without an error.~~
+
+   **Done, and it was already done when this item was written** — the doc
+   comment and this paragraph landed in the same commit, 63434bd. `Email` now
+   opens by saying it does not round-trip, that `ParseRawEmail` retains the
+   trace headers and `BuildMessage` drops them again, and that the drop is
+   silent. Left here because an item that asks for work already finished is
+   exactly the drift this document keeps rediscovering in itself.
 
 Neither needs a release. Both need somebody to decide on purpose, which is what
 this document was for and what its own first version stopped doing the moment
