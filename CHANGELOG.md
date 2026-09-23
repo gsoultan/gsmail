@@ -10,6 +10,8 @@ While the module is at `v0`, breaking changes ship in minor releases. Read the
 
 ## [Unreleased]
 
+## [v0.11.0]
+
 ### Breaking
 
 - **Nine package-level convenience functions are removed:** `Receive`,
