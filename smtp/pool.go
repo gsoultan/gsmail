@@ -9,8 +9,13 @@ import (
 )
 
 var (
+	// ErrPoolClosed is returned when a connection is requested from a pool that
+	// has been closed. It is terminal: a closed pool does not reopen.
 	ErrPoolClosed = errors.New("pool is closed")
-	ErrPoolFull   = errors.New("pool is full")
+	// ErrPoolFull is returned when every connection is in use and the pool may
+	// not grow further. Unlike ErrPoolClosed this is back-pressure, not a
+	// permanent failure, and a caller may retry once a connection is released.
+	ErrPoolFull = errors.New("pool is full")
 )
 
 // PoolConfig defines the configuration for the SMTP connection pool.

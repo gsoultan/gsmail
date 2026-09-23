@@ -503,6 +503,17 @@ func ValidateEmailSyntax(email string) error {
 	return v.Validate(context.Background(), email)
 }
 
+// ParseRawEmail parses an RFC 5322 message into an [Email].
+//
+// Header values are sanitised at this boundary rather than on the way out. A
+// malformed header can carry a bare CR — net/mail accepts "To:0\r0" — and once
+// that value is inside an Email it travels wherever the caller takes it.
+//
+// The result does not round-trip. Headers retains the trace headers that record
+// how the message travelled, which [BuildMessage] drops again when rendering;
+// see [Email] for why. A body whose Content-Type cannot be parsed is kept as
+// plaintext rather than rejected, on the grounds that a message already
+// delivered is better read imperfectly than not at all.
 func ParseRawEmail(raw []byte) (Email, error) {
 	msg, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {

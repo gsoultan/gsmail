@@ -27,6 +27,7 @@ type HTTPError struct {
 	Delay time.Duration
 }
 
+// Error implements the error interface.
 func (e *HTTPError) Error() string {
 	if e.Body == "" {
 		return fmt.Sprintf("%s: unexpected status %d (%s)", e.Provider, e.StatusCode, http.StatusText(e.StatusCode))

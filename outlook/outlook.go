@@ -241,6 +241,18 @@ func AlreadyConverted(html []byte) bool {
 	return bytes.Contains(html, outlookSentinel)
 }
 
+// ToOutlookHTML rewrites an HTML document so Microsoft Outlook renders it as
+// intended, injecting the mso conditional block, the container table and the
+// head tags its engine needs.
+//
+// It is idempotent, and deliberately so: it marks what it produces and returns
+// an already-converted document untouched. Without that, a pipeline hardening
+// on save and again on send appended every injection twice, which rendered
+// correctly but shipped a document large enough to matter — Gmail clips at
+// 102KB and drops the remainder. Use [AlreadyConverted] to test for the mark
+// without doing the work.
+//
+// An empty input is returned unchanged.
 func ToOutlookHTML(html []byte) []byte {
 	if len(html) == 0 {
 		return html
